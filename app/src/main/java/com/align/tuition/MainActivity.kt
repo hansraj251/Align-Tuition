@@ -110,6 +110,15 @@ private fun showFeeDatePicker(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                window.decorView.systemUiVisibility or
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        }
         window.statusBarColor = android.graphics.Color.rgb(18, 61, 47)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
             window.decorView.systemUiVisibility =
@@ -173,6 +182,8 @@ private fun TuitionApp() {
     var selectedStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var recordFeeStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var studentToCollect by remember { mutableStateOf<StudentEntity?>(null) }
+    var paymentToEdit by remember { mutableStateOf<FeePaymentEntity?>(null) }
+    var paymentToDelete by remember { mutableStateOf<FeePaymentEntity?>(null) }
     var studentToDelete by remember { mutableStateOf<StudentEntity?>(null) }
 
     BackHandler(enabled = selectedStudent != null) {
@@ -180,11 +191,24 @@ private fun TuitionApp() {
         tab = "Students"
     }
 
-    Box(Modifier.fillMaxSize().background(Page)) {
+    Box(
+        Modifier.fillMaxSize().background(
+            if (recordFeeStudent != null || selectedStudent != null) {
+                Color(0xFF123D2F)
+            } else {
+                Page
+            }
+        )
+    ) {
         Scaffold(
-            containerColor = if (recordFeeStudent != null) Color(0xFF123D2F) else Page,
+            containerColor = if (recordFeeStudent != null || selectedStudent != null) {
+                Color(0xFF123D2F)
+            } else {
+                Page
+            },
             bottomBar = {
-                NavigationBar(containerColor = Color.White) {
+                if (selectedStudent == null && recordFeeStudent == null) {
+                    NavigationBar(containerColor = Color.White) {
                     NavigationBarItem(
                         selected = tab == "Dashboard",
                         onClick = { tab = "Dashboard" },
@@ -218,6 +242,7 @@ private fun TuitionApp() {
                             indicatorColor = Green
                         )
                     )
+                    }
                 }
             }
         ) { padding ->
@@ -227,6 +252,14 @@ private fun TuitionApp() {
                 Column(
                     modifier = if (recordFeeStudent != null) {
                         Modifier.fillMaxSize().background(Page)
+                    } else if (selectedStudent != null || tab == "Students") {
+                        Modifier.fillMaxSize().background(
+                            if (selectedStudent == null && tab == "Students") {
+                                Color(0xFF123D2F)
+                            } else {
+                                Page
+                            }
+                        )
                     } else {
                         Modifier.fillMaxWidth()
                             .background(Color.White)
@@ -240,20 +273,16 @@ private fun TuitionApp() {
                         history = feeRecords.filter { it.studentId == feeStudent.id },
                         onBack = { recordFeeStudent = null },
                         onSave = { updatedStudent, record ->
-                            scope.launch {
-                                dao.updateStudent(updatedStudent)
-                                if (record.id == 0L) {
-                                    dao.insertFeeRecord(record)
-                                } else {
-                                    dao.updateFeeRecord(record)
-                                }
+                            dao.updateStudent(updatedStudent)
+                            if (record.id == 0L) {
+                                dao.insertFeeRecord(record)
+                            } else {
+                                dao.updateFeeRecord(record)
                             }
                             selectedStudent = updatedStudent
                         },
                         onDelete = { record ->
-                            scope.launch {
-                                dao.deleteFeeRecord(record)
-                            }
+                            dao.deleteFeeRecord(record)
                         }
                     )
                 } else if (selectedStudent != null) {
@@ -266,12 +295,14 @@ private fun TuitionApp() {
                         modifier = Modifier.weight(1f),
                         student = detailStudent,
                         payments = detailPayments,
+                        feeRecords = feeRecords.filter { it.studentId == detailStudent.id },
                         onEdit = {
                             studentToEdit = detailStudent
                             showStudentEditor = true
                         },
                         onRecordFee = { recordFeeStudent = detailStudent },
                         onCollect = { studentToCollect = detailStudent },
+        onPaymentClick = { paymentToEdit = it },
                         onBack = {
                             selectedStudent = null
                             tab = "Students"
@@ -281,7 +312,12 @@ private fun TuitionApp() {
                     "Students" -> StudentsScreen(
                         modifier = Modifier.weight(1f),
                         students = students,
-                        paidByStudent = paidByStudent,
+                        pendingByStudent = students.associate { student ->
+                            student.id to (
+                                feeRecords.filter { it.studentId == student.id }.sumOf { it.amount } -
+                                payments.filter { it.studentId == student.id }.sumOf { it.amount }
+                            ).coerceAtLeast(0L)
+                        },
                         onAdd = {
                             studentToEdit = null
                             showStudentEditor = true
@@ -290,7 +326,6 @@ private fun TuitionApp() {
                             studentToEdit = it
                             showStudentEditor = true
                         },
-                        onCollect = { studentToCollect = it },
                         onStudentClick = { selectedStudent = it }
                     )
                     "Fees" -> FeesScreen(
@@ -339,12 +374,79 @@ private fun TuitionApp() {
         studentToCollect?.let { student ->
             PaymentDialog(
                 student = student,
+                pendingAmount = (feeRecords.filter { it.studentId == student.id }.sumOf { it.amount } - payments.filter { it.studentId == student.id }.sumOf { it.amount }).coerceAtLeast(0L),
                 onDismiss = { studentToCollect = null },
                 onSave = { payment ->
                     scope.launch { dao.insertPayment(payment) }
                     studentToCollect = null
                     tab = "Fees"
                 }
+            )
+        }
+
+        paymentToEdit?.let { payment ->
+            val paymentStudent = students.firstOrNull { it.id == payment.studentId }
+            if (paymentStudent != null) {
+                PaymentDialog(
+                    student = paymentStudent,
+                    pendingAmount = (feeRecords.filter { it.studentId == payment.studentId }.sumOf { it.amount } - payments.filter { it.studentId == payment.studentId }.sumOf { it.amount } + payment.amount).coerceAtLeast(0L),
+                    existingPayment = payment,
+                    onDismiss = { paymentToEdit = null },
+                    onSave = { updated ->
+                        scope.launch { dao.updatePayment(updated) }
+                        paymentToEdit = null
+                    },
+                    onDelete = {
+                        paymentToDelete = payment
+                        paymentToEdit = null
+                    }
+                )
+            }
+        }
+
+        paymentToDelete?.let { payment ->
+            AlertDialog(
+                onDismissRequest = { paymentToDelete = null },
+                shape = RoundedCornerShape(24.dp),
+                containerColor = Color.White,
+                title = { Text("Delete collected fee?") },
+                text = {
+                    Text("Delete this ${rupees(payment.amount)} payment? This cannot be undone.")
+                },
+                confirmButton = {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { paymentToDelete = null },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFFD5E4DB))
+                        ) {
+                            Text("Cancel", color = Ink)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch { dao.deletePayment(payment) }
+                                paymentToDelete = null
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFFB3261E)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = Color(0xFFB3261E)
+                            )
+                        ) {
+                            Text("Delete")
+                        }
+                    }
+                },
+                dismissButton = {}
             )
         }
 
@@ -440,10 +542,9 @@ private fun StatCard(title: String, value: String, subtitle: String) {
 private fun StudentsScreen(
     modifier: Modifier,
     students: List<StudentEntity>,
-    paidByStudent: Map<Long, Long>,
+    pendingByStudent: Map<Long, Long>,
     onAdd: () -> Unit,
     onEdit: (StudentEntity) -> Unit,
-    onCollect: (StudentEntity) -> Unit,
     onStudentClick: (StudentEntity) -> Unit
 ) {
     var search by remember { mutableStateOf("") }
@@ -454,22 +555,37 @@ private fun StudentsScreen(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        Column(
-            Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            OutlinedTextField(
-                value = search,
-                onValueChange = { search = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("Search name, phone or class") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) }
-            )
-            Spacer(Modifier.height(10.dp))
+        Column(Modifier.fillMaxSize().background(Color(0xFF123D2F))) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF123D2F))
+                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.White, RoundedCornerShape(16.dp)),
+                    singleLine = true,
+                    placeholder = { Text("Search name, phone or class") },
+                    leadingIcon = {
+                        Icon(Icons.Default.Search, contentDescription = null)
+                    },
+                    shape = RoundedCornerShape(16.dp)
+                )
+            }
 
             Column(
-                Modifier.weight(1f).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(Page)
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (filtered.isEmpty()) {
                     EmptyState(
@@ -480,10 +596,9 @@ private fun StudentsScreen(
                 filtered.forEach { student ->
                     StudentCard(
                         student = student,
-                        paidThisMonth = paidByStudent[student.id] ?: 0L,
+                        pendingPayment = pendingByStudent[student.id] ?: 0L,
                         onClick = { onStudentClick(student) },
-                        onEdit = { onEdit(student) },
-                        onCollect = { onCollect(student) }
+                        onEdit = { onEdit(student) }
                     )
                 }
             }
@@ -511,190 +626,213 @@ private fun StudentsScreen(
 @Composable
 private fun StudentCard(
     student: StudentEntity,
-    paidThisMonth: Long,
+    pendingPayment: Long,
     onClick: () -> Unit,
-    onEdit: () -> Unit,
-    onCollect: () -> Unit
+    onEdit: () -> Unit
 ) {
     Card(
-        modifier = Modifier.combinedClickable(
+        modifier = Modifier.fillMaxWidth().combinedClickable(
             onClick = onClick,
             onLongClick = onEdit
         ),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = RoundedCornerShape(16.dp)
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, Color(0xFFE2EBE5)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
     ) {
-        Column(Modifier.fillMaxWidth().padding(14.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
-                Column(Modifier.weight(1f)) {
-                    Text(student.name, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Column(
+            Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier.size(46.dp)
+                        .background(Color(0xFFE7F3EC), RoundedCornerShape(14.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
-                        listOf(student.className, student.phone)
-                            .filter { it.isNotBlank() }.joinToString(" • ")
-                            .ifBlank { "No class or phone added" },
-                        color = Muted, fontSize = 12.sp
+                        student.name.trim().firstOrNull()?.uppercase() ?: "?",
+                        color = Color(0xFF176B48),
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.ExtraBold
                     )
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(rupees(student.monthlyFee), color = Green, fontWeight = FontWeight.Bold)
-                    Text(feeTypeLabel(student), color = Muted, fontSize = 11.sp)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        student.name,
+                        color = Ink,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                    Text(
+                        listOf(student.className, student.phone)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" • "),
+                        color = Muted,
+                        fontSize = 12.sp,
+                        maxLines = 1
+                    )
+                }
+                if (student.monthlyFee > 0L) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(rupees(student.monthlyFee), color = Green, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(feeTypeLabel(student), color = Muted, fontSize = 11.sp)
+                    }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            val due = FeeMath.pendingFee(student.monthlyFee, paidThisMonth)
-            Text(
-                if (due == 0L) "This month: Paid" else "This month due: ${rupees(due)}",
-                color = if (due == 0L) Green else Color(0xFFB45309),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+
+            HorizontalDivider(color = Color(0xFFEDF1EE), thickness = 1.dp)
+
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                modifier = Modifier.fillMaxWidth()
+                    .background(Color(0xFFF1F8F4), RoundedCornerShape(13.dp))
+                    .padding(horizontal = 10.dp, vertical = 9.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onCollect) { Text("Collect fee") }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Pending Payment", color = Color(0xFF52665A), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        rupees(pendingPayment),
+                        color = if (pendingPayment > 0L) Color(0xFFB45309) else Green,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+                Text(
+                    if (pendingPayment > 0L) "DUE" else "CLEAR",
+                    color = if (pendingPayment > 0L) Color(0xFF9A4A08) else Green,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.background(
+                        if (pendingPayment > 0L) Color(0xFFFFEBD1) else Color(0xFFDDF3E5),
+                        RoundedCornerShape(8.dp)
+                    ).padding(horizontal = 10.dp, vertical = 6.dp)
+                )
             }
         }
     }
 }
-
-
 
 @Composable
 private fun StudentDetailsScreen(
     modifier: Modifier,
     student: StudentEntity,
     payments: List<FeePaymentEntity>,
+    feeRecords: List<FeeRecordEntity>,
     onEdit: () -> Unit,
     onRecordFee: () -> Unit,
     onCollect: () -> Unit,
+    onPaymentClick: (FeePaymentEntity) -> Unit,
     onBack: () -> Unit
 ) {
-    Column(
-        modifier = modifier.fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        TextButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            Text(" Students")
-        }
-
-        Card(
-            onClick = onEdit,
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            shape = RoundedCornerShape(22.dp),
-            border = BorderStroke(1.dp, Color(0xFFE0E8E3)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    Column(Modifier.fillMaxSize().background(Page)) {
+        Row(
+            modifier = Modifier.fillMaxWidth()
+                .background(Color(0xFF123D2F))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Box(
-                    modifier = Modifier.size(62.dp)
-                        .background(Color(0xFFE5F3EC), RoundedCornerShape(20.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        student.name.trim().firstOrNull()?.uppercase() ?: "S",
-                        color = Color(0xFF14532D),
-                        fontSize = 27.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(5.dp)
-                ) {
-                    Text(
-                        student.name,
-                        color = Ink,
-                        fontSize = 21.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        student.phone.ifBlank { "Phone number not added" },
-                        color = Muted,
-                        fontSize = 13.sp
-                    )
-                    if (student.className.isNotBlank()) {
-                        Text(
-                            "Class / Batch: ${student.className}",
-                            color = Green,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Text("Tap to edit profile", color = Muted, fontSize = 12.sp)
-                }
+            IconButton(onClick = onBack) {
                 Icon(
-                    Icons.Filled.Edit,
-                    contentDescription = "Edit student",
-                    tint = Muted
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                student.name,
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
+
+        Column(
+            Modifier.weight(1f).fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+
+        val pendingPaymentTotal = (feeRecords.sumOf { it.amount } - payments.sumOf { it.amount }).coerceAtLeast(0L)
 
         Card(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F7F2)),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
             shape = RoundedCornerShape(18.dp),
             border = BorderStroke(1.dp, Color(0xFFD8E9DE))
         ) {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    "FEE OVERVIEW",
-                    color = Green,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.4.sp
+                    "Pending Payment",
+                    color = Muted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Fee plan", color = Muted, fontSize = 12.sp)
-                        Text(
-                            feeTypeLabel(student),
-                            color = Ink,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text("Fee amount", color = Muted, fontSize = 12.sp)
-                        Text(
-                            rupees(student.monthlyFee),
-                            color = Green,
-                            fontSize = 21.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-                if (student.feeType == "DATE_RANGE") {
-                    HorizontalDivider(color = Color(0xFFD8E9DE))
-                    Text(
-                        "${student.feeStartDate}  –  ${student.feeEndDate}",
-                        color = Muted,
-                        fontSize = 13.sp
-                    )
-                }
+                Text(
+                    rupees(pendingPaymentTotal),
+                    color = Green,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
 
+        Text("Payment history", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+
+        if (payments.isEmpty()) {
+            EmptyState("No payments yet", "Payments collected for this student will appear here.")
+        } else {
+            payments.forEach { payment ->
+                Card(
+                    onClick = { onPaymentClick(payment) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(
+                            Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                paymentPeriodLabel(payment.monthKey),
+                                color = Ink,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                "${payment.method} • ${dateText(payment.paidAt)}",
+                                color = Muted,
+                                fontSize = 12.sp
+                            )
+                            if (payment.note.isNotBlank()) {
+                                Text(payment.note, color = Muted, fontSize = 12.sp)
+                            }
+                        }
+                        Text(rupees(payment.amount), color = Green, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth()
+                .background(Page)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             OutlinedButton(
@@ -752,44 +890,8 @@ private fun StudentDetailsScreen(
             }
         }
 
-        Text("Payment history", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
 
-        if (payments.isEmpty()) {
-            EmptyState("No payments yet", "Payments collected for this student will appear here.")
-        } else {
-            payments.forEach { payment ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(
-                            Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text(
-                                paymentPeriodLabel(payment.monthKey),
-                                color = Ink,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                "${payment.method} • ${dateText(payment.paidAt)}",
-                                color = Muted,
-                                fontSize = 12.sp
-                            )
-                            if (payment.note.isNotBlank()) {
-                                Text(payment.note, color = Muted, fontSize = 12.sp)
-                            }
-                        }
-                        Text(rupees(payment.amount), color = Green, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
+}
 }
 
 
@@ -874,7 +976,7 @@ private fun RecordFeeScreen(
     student: StudentEntity,
     history: List<FeeRecordEntity>,
     onBack: () -> Unit,
-    onSave: (StudentEntity, FeeRecordEntity) -> Unit,
+    onSave: suspend (StudentEntity, FeeRecordEntity) -> Unit,
     onDelete: suspend (FeeRecordEntity) -> Unit
 ) {
     val feeScreenScrollState = rememberScrollState()
@@ -931,55 +1033,7 @@ private fun RecordFeeScreen(
                 .padding(horizontal = 10.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, Color(0xFFD5E4DB)),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(13.dp)
-                ) {
-                    Box(
-                        modifier = Modifier.size(52.dp)
-                            .background(Color(0xFFE5F3EC), RoundedCornerShape(17.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            student.name.trim().firstOrNull()?.uppercase() ?: "S",
-                            color = Color(0xFF14532D),
-                            fontSize = 23.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Text(
-                            "RECORDING FOR",
-                            color = Green,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.4.sp
-                        )
-                        Text(
-                            student.name,
-                            color = Ink,
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (student.className.isNotBlank()) {
-                            Text(student.className, color = Muted, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
+    
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -1274,18 +1328,24 @@ private fun RecordFeeScreen(
                                     note = noteText.trim(),
                                     title = if (entryKind == "OTHER") titleText.trim() else ""
                                 )
-                                onSave(updatedStudent, record)
-                                editingRecord = null
-                                feeType = "MONTHLY"
-                                feeText = ""
-                                noteText = ""
-                                titleText = ""
-                                entryKind = "FEES"
-                                selectedMonthKey = YearMonth.now().toString()
-                                selectedYear = LocalDate.now().year.toString()
-                                startDate = LocalDate.now().withDayOfMonth(1).toString()
-                                endDate = LocalDate.now().toString()
-                                error = ""
+                                feeScreenScope.launch {
+                                    try {
+                                        onSave(updatedStudent, record)
+                                        editingRecord = null
+                                        feeType = "MONTHLY"
+                                        feeText = ""
+                                        noteText = ""
+                                        titleText = ""
+                                        entryKind = "FEES"
+                                        selectedMonthKey = YearMonth.now().toString()
+                                        selectedYear = LocalDate.now().year.toString()
+                                        startDate = LocalDate.now().withDayOfMonth(1).toString()
+                                        endDate = LocalDate.now().toString()
+                                        error = ""
+                                    } catch (e: Exception) {
+                                        error = "Could not save fee record. Please try again."
+                                    }
+                                }
                             }
                         }
                     },
@@ -1421,46 +1481,71 @@ private fun RecordFeeScreen(
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color.White,
             title = { Text("Delete fee record?") },
             text = {
-                Text("This permanently deletes this fee-history entry. The student profile will remain.")
+                Text(
+                    "This permanently deletes this fee-history entry."
+                )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    val recordToDelete = editingRecord
-                    if (recordToDelete != null) {
-                        feeScreenScope.launch {
-                            try {
-                                onDelete(recordToDelete)
-                                editingRecord = null
-                                feeType = "MONTHLY"
-                                feeText = ""
-                                noteText = ""
-                                titleText = ""
-                                entryKind = "FEES"
-                                selectedMonthKey = YearMonth.now().toString()
-                                selectedYear = LocalDate.now().year.toString()
-                                startDate = LocalDate.now().withDayOfMonth(1).toString()
-                                endDate = LocalDate.now().toString()
-                                error = ""
-                                showDeleteConfirmation = false
-                            } catch (e: Exception) {
-                                error = "Could not delete fee record. Please try again."
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = { showDeleteConfirmation = false },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFD5E4DB))
+                    ) {
+                        Text("Cancel", color = Ink)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val recordToDelete = editingRecord
+                            if (recordToDelete != null) {
+                                feeScreenScope.launch {
+                                    try {
+                                        onDelete(recordToDelete)
+                                        editingRecord = null
+                                        feeType = "MONTHLY"
+                                        feeText = ""
+                                        noteText = ""
+                                        titleText = ""
+                                        entryKind = "FEES"
+                                        selectedMonthKey = YearMonth.now().toString()
+                                        selectedYear = LocalDate.now().year.toString()
+                                        startDate = LocalDate.now().withDayOfMonth(1).toString()
+                                        endDate = LocalDate.now().toString()
+                                        error = ""
+                                        showDeleteConfirmation = false
+                                    } catch (e: Exception) {
+                                        error = "Could not delete fee record. Please try again."
+                                        showDeleteConfirmation = false
+                                    }
+                                }
+                            } else {
                                 showDeleteConfirmation = false
                             }
-                        }
-                    } else {
-                        showDeleteConfirmation = false
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFB3261E)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color(0xFFB3261E)
+                        )
+                    ) {
+                        Text("Delete")
                     }
-                }) {
-                    Text("Delete", color = Color(0xFFB3261E))
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirmation = false }) {
-                    Text("Cancel")
-                }
-            }
+            dismissButton = {}
         )
     }
 
@@ -1604,67 +1689,166 @@ private fun StudentEditorDialog(
 @Composable
 private fun PaymentDialog(
     student: StudentEntity,
+    pendingAmount: Long,
+    existingPayment: FeePaymentEntity? = null,
     onDismiss: () -> Unit,
-    onSave: (FeePaymentEntity) -> Unit
+    onSave: (FeePaymentEntity) -> Unit,
+    onDelete: (() -> Unit)? = null
 ) {
-    var amountText by remember(student.id) { mutableStateOf(student.monthlyFee.toString()) }
-    var method by remember(student.id) { mutableStateOf("Cash") }
-    var note by remember(student.id) { mutableStateOf("") }
-    var error by remember { mutableStateOf("") }
+    var amountText by remember(student.id, existingPayment?.id) {
+        mutableStateOf(existingPayment?.amount?.toString().orEmpty())
+    }
+    var method by remember(student.id, existingPayment?.id) {
+        mutableStateOf(
+            if (existingPayment?.method == "Cash") "Cash"
+            else if (existingPayment != null) "Online"
+            else "Cash"
+        )
+    }
+    var note by remember(student.id, existingPayment?.id) {
+        mutableStateOf(existingPayment?.note.orEmpty())
+    }
+    var error by remember(student.id, existingPayment?.id) { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Collect fee") },
+        shape = RoundedCornerShape(24.dp),
+        containerColor = Color(0xFFF7FAF8),
+        title = {
+            Text(
+                if (existingPayment == null) "Collect Fee" else "Edit Collected Fee",
+                color = Color(0xFF123D2F),
+                fontSize = 23.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(student.name, color = Green, fontWeight = FontWeight.Bold)
-                Text("Monthly fee: ${rupees(student.monthlyFee)}", color = Muted)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 430.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(13.dp)
+            ) {
                 OutlinedTextField(
-                    amountText,
-                    { amountText = it; error = "" },
-                    label = { Text("Amount received (₹)") },
+                    value = amountText,
+                    onValueChange = {
+                        amountText = it.filter(Char::isDigit)
+                        error = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Amount (₹)") },
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    shape = RoundedCornerShape(14.dp),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number
+                    )
                 )
-                Text("Payment method", color = Ink, fontWeight = FontWeight.SemiBold)
+
+                Text(
+                    "PAYMENT METHOD",
+                    color = Ink,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("Cash", "UPI", "Bank").forEach {
+                    listOf("Cash", "Online").forEach { option ->
                         FilterChip(
-                            selected = method == it,
-                            onClick = { method = it },
-                            label = { Text(it) }
+                            selected = method == option,
+                            onClick = { method = option },
+                            label = { Text(option) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFDCEFE3),
+                                selectedLabelColor = Color(0xFF123D2F)
+                            )
                         )
                     }
                 }
+
                 OutlinedTextField(
-                    note,
-                    { note = it },
+                    value = note,
+                    onValueChange = { note = it },
+                    modifier = Modifier.fillMaxWidth(),
                     label = { Text("Note (optional)") },
-                    singleLine = true
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp)
                 )
-                if (error.isNotBlank()) Text(error, color = Color(0xFFB3261E), fontSize = 12.sp)
-                Text("Partial payments are supported.", color = Muted, fontSize = 12.sp)
+
+                if (error.isNotBlank()) {
+                    Text(error, color = Color(0xFFB3261E), fontSize = 12.sp)
+                }
+
+                if (existingPayment != null && onDelete != null) {
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFFB3261E)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color(0xFFB3261E)
+                        )
+                    ) {
+                        Text("Delete", fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                val amount = amountText.toLongOrNull()
-                if (amount == null || amount <= 0L) {
-                    error = "Enter an amount greater than zero."
-                } else {
-                    onSave(
-                        FeePaymentEntity(
-                            studentId = student.id,
-                            monthKey = currentFeePeriodKey(student) ?: YearMonth.now().toString(),
-                            amount = amount,
-                            method = method,
-                            note = note.trim()
-                        )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFFD5E4DB))
+                ) {
+                    Text("Cancel", color = Ink)
+                }
+
+                Button(
+                    onClick = {
+                        val amount = amountText.toLongOrNull()
+                        when {
+                            amount == null || amount <= 0L ->
+                                error = "Enter an amount greater than zero."
+                            amount > pendingAmount ->
+                                error = "Amount cannot exceed ${rupees(pendingAmount)}."
+                            else -> onSave(
+                                FeePaymentEntity(
+                                    id = existingPayment?.id ?: 0L,
+                                    studentId = student.id,
+                                    monthKey = existingPayment?.monthKey
+                                        ?: currentFeePeriodKey(student)
+                                        ?: YearMonth.now().toString(),
+                                    amount = amount,
+                                    paidAt = existingPayment?.paidAt
+                                        ?: System.currentTimeMillis(),
+                                    method = method,
+                                    note = note.trim()
+                                )
+                            )
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    enabled = pendingAmount > 0L,
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF123D2F)
+                    )
+                ) {
+                    Text(
+                        if (existingPayment == null) "Collect" else "Save",
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
-            }) { Text("Record payment") }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+        dismissButton = {}
     )
 }
 

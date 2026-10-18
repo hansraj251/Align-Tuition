@@ -111,6 +111,12 @@ interface TuitionDao {
 
     @Insert
     suspend fun insertPayment(payment: FeePaymentEntity): Long
+
+    @Update
+    suspend fun updatePayment(payment: FeePaymentEntity)
+
+    @Delete
+    suspend fun deletePayment(payment: FeePaymentEntity)
 }
 
 
