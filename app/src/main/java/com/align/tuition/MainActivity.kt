@@ -124,8 +124,283 @@ private fun showFeeDatePicker(
 }
 
 class MainActivity : ComponentActivity() {
+    private lateinit var driveCoordinator: com.align.tuition.backup.GoogleDriveSyncCoordinator
+    private val DRIVE_AUTH_REQUEST = 7812
+    private var pendingDriveAction = "backup"
+
+
+    @Deprecated("Deprecated in Android; retained for Drive authorization")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: android.content.Intent?
+    ) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != DRIVE_AUTH_REQUEST) return
+
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            android.widget.Toast.makeText(
+                this, "Google Drive authorization cancelled",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        try {
+            val authResult =
+                com.google.android.gms.auth.api.identity.Identity
+                    .getAuthorizationClient(this)
+                    .getAuthorizationResultFromIntent(data)
+            val token = authResult.accessToken
+            if (token.isNullOrBlank()) {
+                throw IllegalStateException("Google returned no access token.")
+            }
+
+            when (pendingDriveAction) {
+                "verify" -> {
+                    pendingDriveAction = "backup"
+                    verifyDriveBackup(token)
+                }
+                "restore" -> {
+                    pendingDriveAction = "backup"
+                    findAndConfirmRestore(token)
+                }
+                else -> driveCoordinator.continueManualSyncWithAccessToken(token)
+            }
+        } catch (error: Exception) {
+            pendingDriveAction = "backup"
+            android.widget.Toast.makeText(
+                this,
+                "Google authorization failed: ${error.message ?: error.javaClass.simpleName}",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            android.util.Log.e("TuitionDriveAuth", "Authorization result failed", error)
+        }
+    }
+
+    private fun startDriveVerification() {
+        pendingDriveAction = "verify"
+        try {
+            com.align.tuition.backup.GoogleDriveAuthorization(this)
+                .authorize()
+                .addOnSuccessListener { result ->
+                    if (result.hasResolution()) {
+                        val sender = result.pendingIntent?.intentSender
+                        if (sender == null) {
+                            pendingDriveAction = "backup"
+                            showDriveMessage("Google authorization needs to be retried.")
+                        } else {
+                            try {
+                                startIntentSenderForResult(
+                                    sender, DRIVE_AUTH_REQUEST, null, 0, 0, 0
+                                )
+                            } catch (error: Exception) {
+                                pendingDriveAction = "backup"
+                                showDriveMessage("Could not open Google authorization: ${error.message}")
+                            }
+                        }
+                        return@addOnSuccessListener
+                    }
+
+                    val token = result.accessToken
+                    if (token.isNullOrBlank()) {
+                        pendingDriveAction = "backup"
+                        showDriveMessage("Google returned no access token.")
+                    } else {
+                        pendingDriveAction = "backup"
+                        verifyDriveBackup(token)
+                    }
+                }
+                .addOnFailureListener { error ->
+                    pendingDriveAction = "backup"
+                    showDriveMessage("Authorization failed: ${error.message ?: "Unknown error"}")
+                    android.util.Log.e("TuitionDriveAuth", "Verify authorization failed", error)
+                }
+        } catch (error: Exception) {
+            pendingDriveAction = "backup"
+            showDriveMessage("Could not start verification: ${error.message}")
+        }
+    }
+
+    private fun startDriveRestore() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Restore from Google Drive?")
+            .setMessage(
+                "Restore will replace the tuition data currently on this device. " +
+                "A local safety copy will be kept first. Continue?"
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Continue") { _, _ ->
+                pendingDriveAction = "restore"
+                try {
+                    com.align.tuition.backup.GoogleDriveAuthorization(this)
+                        .authorize()
+                        .addOnSuccessListener { result ->
+                            if (result.hasResolution()) {
+                                val sender = result.pendingIntent?.intentSender
+                                if (sender == null) {
+                                    pendingDriveAction = "backup"
+                                    showDriveMessage("Google authorization needs to be retried.")
+                                } else {
+                                    try {
+                                        startIntentSenderForResult(
+                                            sender, DRIVE_AUTH_REQUEST, null, 0, 0, 0
+                                        )
+                                    } catch (error: Exception) {
+                                        pendingDriveAction = "backup"
+                                        showDriveMessage("Could not open Google authorization: ${error.message}")
+                                    }
+                                }
+                            } else {
+                                val token = result.accessToken
+                                pendingDriveAction = "backup"
+                                if (token.isNullOrBlank()) {
+                                    showDriveMessage("Google returned no access token.")
+                                } else {
+                                    findAndConfirmRestore(token)
+                                }
+                            }
+                        }
+                        .addOnFailureListener { error ->
+                            pendingDriveAction = "backup"
+                            showDriveMessage("Google authorization failed: ${error.message}")
+                        }
+                } catch (error: Exception) {
+                    pendingDriveAction = "backup"
+                    showDriveMessage("Could not start restore: ${error.message}")
+                }
+            }
+            .show()
+    }
+
+    private fun findAndConfirmRestore(accessToken: String) {
+        val restore = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+        showDriveMessage("Finding Google Drive backup...")
+        restore.findBackupMetadata(accessToken) { result ->
+            result.onFailure { error ->
+                showDriveMessage("Could not find backup: ${error.message}")
+            }.onSuccess { metadata ->
+                if (metadata == null) {
+                    showDriveMessage("No Align-Tuition backup found in Google Drive.")
+                } else {
+                    android.app.AlertDialog.Builder(this)
+                        .setTitle("Confirm Restore")
+                        .setMessage(
+                            "Backup modified: ${metadata.modifiedTime}\n\n" +
+                            "Restoring replaces the data on this device. A local safety copy will be kept. " +
+                            "Do not close the app during restore."
+                        )
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Restore") { _, _ ->
+                            showDriveMessage("Downloading and validating backup...")
+                            restore.restore(accessToken, metadata.fileId) { downloadResult ->
+                                downloadResult.onFailure { error ->
+                                    showDriveMessage(
+                                        "Restore cancelled: ${error.message ?: error.javaClass.simpleName}"
+                                    )
+                                }.onSuccess {
+                                    try {
+                                        TuitionDatabase.closeInstance()
+                                        val safetyCopy = restore.replaceValidatedDatabase()
+                                        showDriveMessage(
+                                            "Restore completed. Local safety copy: ${safetyCopy.name}\nThe app will reload."
+                                        )
+                                        window.decorView.postDelayed({ recreate() }, 900)
+                                    } catch (error: Exception) {
+                                        android.util.Log.e(
+                                            "TuitionDriveRestore", "Database replacement failed", error
+                                        )
+                                        showDriveMessage(
+                                            "Restore failed: ${error.message ?: error.javaClass.simpleName}. " +
+                                            "Check local safety backup before retrying."
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        .show()
+                }
+            }
+        }
+    }
+
+    private fun verifyDriveBackup(accessToken: String) {
+        showDriveMessage("Checking Google Drive backup...")
+        com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+            .findBackupMetadata(accessToken) { result ->
+                result
+                    .onSuccess { metadata ->
+                        if (metadata == null) {
+                            showDriveMessage("No Align Tuition backup found in Google Drive app data.")
+                        } else {
+                            showDriveMessage(
+                                "Backup found: Align Tuition Backup.db\nModified: ${metadata.modifiedTime}\nFile ID: ${metadata.fileId}"
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        showDriveMessage(
+                            "Backup verification failed: ${error.message ?: error.javaClass.simpleName}"
+                        )
+                        android.util.Log.e("TuitionDriveAuth", "Drive backup verification failed", error)
+                    }
+            }
+    }
+
+    private fun showDriveMessage(message: String) {
+        runOnUiThread {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Google Drive Backup")
+                .setMessage(message)
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        driveCoordinator = com.align.tuition.backup.GoogleDriveSyncCoordinator(
+            context = applicationContext,
+            authorization = com.align.tuition.backup.GoogleDriveAuthorization(this),
+            backup = com.align.tuition.backup.GoogleDriveBackup(applicationContext),
+            database = TuitionDatabase.get(applicationContext).openHelper.writableDatabase,
+            onAuthorizationRequired = { intentSender ->
+                startIntentSenderForResult(
+                    intentSender,
+                    DRIVE_AUTH_REQUEST,
+                    null,
+                    0,
+                    0,
+                    0
+                )
+            },
+            onSyncStarted = {
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this, "Google Drive backup started",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            onSyncSuccess = {
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this, "Google Drive backup completed",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            },
+            onSyncFailure = { error ->
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this,
+                        "Backup failed: ${error.message ?: "Unknown error"}",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
         } else {
@@ -150,14 +425,22 @@ class MainActivity : ComponentActivity() {
                     surface = Color.White
                 )
             ) {
-                TuitionApp()
+                TuitionApp(
+                    onBackupClick = { driveCoordinator.requestManualSync() },
+                    onVerifyBackupClick = { startDriveVerification() },
+                    onRestoreBackupClick = { startDriveRestore() }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun TuitionApp() {
+private fun TuitionApp(
+    onBackupClick: () -> Unit,
+    onVerifyBackupClick: () -> Unit,
+    onRestoreBackupClick: () -> Unit
+) {
     val context = LocalContext.current
     val dao = remember { TuitionDatabase.get(context).tuitionDao() }
     val scope = rememberCoroutineScope()
@@ -328,6 +611,9 @@ BackHandler(
                     }
                 } else when (tab) {
                     "Profile" -> ProfileScreen(
+                        onBackupClick = onBackupClick,
+                        onVerifyBackupClick = onVerifyBackupClick,
+                        onRestoreBackupClick = onRestoreBackupClick,
                         modifier = Modifier.weight(1f),
                         profile = profile,
                         onBack = { tab = "Dashboard" },
@@ -669,25 +955,53 @@ private fun CollectionScreen(
     onStudentClick: (StudentEntity) -> Unit,
     onBack: () -> Unit
 ) {
+    var selectedFilter by remember { mutableStateOf("This Month") }
+    val today = java.time.YearMonth.now()
     var selectedMonthKey by remember { mutableStateOf(monthKey) }
+    var selectedYear by remember { mutableStateOf(today.year) }
+    var monthPickerOpen by remember { mutableStateOf(false) }
+    var yearPickerOpen by remember { mutableStateOf(false) }
 
-    val selectedPayments = remember(payments, selectedMonthKey) {
-    payments.filter { it.monthKey == selectedMonthKey }
-}
+    val selectedMonth = remember(selectedMonthKey) {
+        runCatching { java.time.YearMonth.parse(selectedMonthKey) }
+            .getOrDefault(today)
+    }
+    val years = remember(payments, today.year, selectedYear, selectedMonth.year) {
+        (payments.mapNotNull {
+            runCatching { java.time.YearMonth.parse(it.monthKey).year }.getOrNull()
+        } + listOf(today.year, selectedYear, selectedMonth.year))
+            .filter { it > 0 }.distinct().sortedDescending()
+    }
+    val monthNames = java.time.Month.values().map {
+        it.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH)
+    }
 
-val selectedYearMonth = java.time.YearMonth.parse(selectedMonthKey)
-    val selectedMonthLabel =
-        selectedYearMonth.month.name.lowercase()
-            .replaceFirstChar { it.uppercase() } + " " + selectedYearMonth.year
+    val selectedPayments = remember(payments, selectedFilter, selectedMonthKey, selectedYear) {
+        when (selectedFilter) {
+            "This Month" -> payments.filter { it.monthKey == selectedMonthKey }
+            "This Year" -> payments.filter {
+                runCatching { java.time.YearMonth.parse(it.monthKey).year == selectedYear }
+                    .getOrDefault(false)
+            }
+            else -> payments
+        }
+    }
 
-    Column(
-        modifier.fillMaxSize().background(Page)
-    ) {
+    val monthButtonLabel = "${monthNames[selectedMonth.monthValue - 1]} ${selectedMonth.year}"
+    val totalLabel = when (selectedFilter) {
+        "This Month" -> monthButtonLabel
+        "This Year" -> "Year $selectedYear"
+        else -> "All recorded collections"
+    }
+
+    val total = selectedPayments.sumOf { it.amount }
+    Column(modifier.fillMaxSize().background(Page)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF123D2F))
-                .windowInsetsPadding(WindowInsets.statusBars).padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 14.dp),
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -708,43 +1022,133 @@ val selectedYearMonth = java.time.YearMonth.parse(selectedMonthKey)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            TextButton(
-                onClick = {
-                    selectedMonthKey =
-                        selectedYearMonth.minusMonths(1).toString()
+            listOf("This Month", "This Year", "All Time").forEach { filter ->
+                val selected = selectedFilter == filter
+                androidx.compose.foundation.layout.Box(modifier = Modifier.weight(1f)) {
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            if (selected) {
+                                if (filter == "This Month") {
+                                    monthPickerOpen = !monthPickerOpen
+                                    yearPickerOpen = false
+                                } else if (filter == "This Year") {
+                                    yearPickerOpen = !yearPickerOpen
+                                    monthPickerOpen = false
+                                }
+                            } else {
+                                selectedFilter = filter
+                                monthPickerOpen = false
+                                yearPickerOpen = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (selected) Green else Color.White,
+                            contentColor = if (selected) Color.White else Ink
+                        ),
+                        border = if (selected) null else BorderStroke(1.dp, Color(0xFFD8E9DE))
+                    ) {
+                        Text(
+                            when (filter) {
+                                "This Month" -> if (selected) monthButtonLabel else "This Month"
+                                "This Year" -> if (selected) selectedYear.toString() else "This Year"
+                                else -> "All Time"
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = filter == "This Month" && monthPickerOpen,
+                        onDismissRequest = { monthPickerOpen = false },
+                        modifier = Modifier
+                            .background(Color.White)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            TextButton(onClick = {
+                                selectedMonthKey = selectedMonth.minusYears(1).toString()
+                            }) { Text("‹") }
+                            Text(
+                                selectedMonth.year.toString(),
+                                fontWeight = FontWeight.Bold
+                            )
+                            TextButton(onClick = {
+                                selectedMonthKey = selectedMonth.plusYears(1).toString()
+                            }) { Text("›") }
+                        }
+                        monthNames.forEachIndexed { index, name ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        name,
+                                        fontWeight = if (selectedMonth.monthValue == index + 1)
+                                            FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                onClick = {
+                                    selectedMonthKey = selectedMonth
+                                        .withMonth(index + 1).toString()
+                                    monthPickerOpen = false
+                                }
+                            )
+                        }
+                        }
+                    }
+
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = filter == "This Year" && yearPickerOpen,
+                        onDismissRequest = { yearPickerOpen = false },
+                        modifier = Modifier
+                            .background(Color.White)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                        years.forEach { year ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        year.toString(),
+                                        fontWeight = if (selectedYear == year)
+                                            FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                onClick = {
+                                    selectedYear = year
+                                    yearPickerOpen = false
+                                }
+                            )
+                        }
+                        }
+                    }
                 }
-            ) {
-                Text("‹ Previous", color = Green)
-            }
-            Text(
-                selectedMonthLabel,
-                color = Ink,
-                fontWeight = FontWeight.Bold,
-                fontSize = 16.sp
-            )
-            TextButton(
-                onClick = {
-                    selectedMonthKey =
-                        selectedYearMonth.plusMonths(1).toString()
-                }
-            ) {
-                Text("Next ›", color = Green)
             }
         }
 
-        val total = selectedPayments.sumOf { it.amount }
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = Color(0xFFE5F4EA)
-            ),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFE5F4EA)),
             border = BorderStroke(1.dp, Color(0xFFC6E6D0))
         ) {
             Column(
@@ -759,11 +1163,7 @@ val selectedYearMonth = java.time.YearMonth.parse(selectedMonthKey)
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-                Text(
-                    selectedMonthLabel,
-                    color = Color(0xFF557565),
-                    fontSize = 13.sp
-                )
+                Text(totalLabel, color = Color(0xFF557565), fontSize = 13.sp)
                 Text(
                     rupees(total),
                     color = Color(0xFF14532D),
@@ -774,52 +1174,64 @@ val selectedYearMonth = java.time.YearMonth.parse(selectedMonthKey)
         }
 
         Column(
-            Modifier.fillMaxWidth().weight(1f).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = 16.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (students.isEmpty()) {
                 EmptyState("No collection records", "Collected fees will appear here.")
+            } else if (selectedPayments.isEmpty()) {
+                EmptyState("No collection for this filter", "Try another collection period.")
             }
+
             students.forEach { student ->
                 val collected = selectedPayments
                     .filter { it.studentId == student.id }
                     .sumOf { it.amount }
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onStudentClick(student) },
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(
-                        1.dp,
-                        if (student.isDeleted) Color(0xFFFFD9B8) else Color(0xFFD8E9DE)
-                    )
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
+
+                if (collected > 0L || selectedFilter == "All Time") {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onStudentClick(student) },
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (student.isDeleted) Color(0xFFFFD9B8)
+                            else Color(0xFFD8E9DE)
+                        )
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    student.name,
+                                    color = Ink,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 16.sp
+                                )
+                                Text(
+                                    if (student.isDeleted) "Deleted student · Tap to remove"
+                                    else listOf(student.className, student.phone)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(" · "),
+                                    color = if (student.isDeleted) Color(0xFF9A4A08) else Muted,
+                                    fontSize = 12.sp
+                                )
+                            }
                             Text(
-                                student.name,
-                                color = Ink,
-                                fontWeight = FontWeight.SemiBold,
+                                rupees(collected),
+                                color = Color(0xFF245BB5),
+                                fontWeight = FontWeight.Bold,
                                 fontSize = 16.sp
                             )
-                            Text(
-                                if (student.isDeleted) "Deleted student · Tap to remove"
-                                else listOf(student.className, student.phone)
-                                    .filter { it.isNotBlank() }.joinToString(" · "),
-                                color = if (student.isDeleted) Color(0xFF9A4A08) else Muted,
-                                fontSize = 12.sp
-                            )
                         }
-                        Text(
-                            rupees(collected),
-                            color = Color(0xFF245BB5),
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
-                        )
                     }
                 }
             }
@@ -2334,8 +2746,12 @@ private fun ProfileScreen(
     modifier: Modifier,
     profile: ProfileEntity?,
     onBack: () -> Unit,
-    onSave: (String, String) -> Unit
+    onSave: (String, String) -> Unit,
+    onBackupClick: () -> Unit,
+    onVerifyBackupClick: () -> Unit,
+    onRestoreBackupClick: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var name by remember(profile?.name) { mutableStateOf(profile?.name.orEmpty()) }
     var mobile by remember(profile?.mobile) { mutableStateOf(profile?.mobile.orEmpty()) }
     var savedMessage by remember { mutableStateOf(false) }
@@ -2491,7 +2907,24 @@ private fun ProfileScreen(
                 icon = Icons.Default.CloudUpload,
                 title = "Backup & Restore",
                 subtitle = "Protect your tuition data",
-                status = "Coming soon"
+                status = "Back up now",
+                onClick = onBackupClick
+            )
+
+            ProfileSettingCard(
+                icon = Icons.Default.CloudUpload,
+                title = "Verify Backup",
+                subtitle = "Check whether the backup file exists in Google Drive",
+                status = "Check now",
+                onClick = onVerifyBackupClick
+            )
+
+            ProfileSettingCard(
+                icon = Icons.Default.CloudUpload,
+                title = "Restore from Google Drive",
+                subtitle = "Download a backup and restore tuition data",
+                status = "Restore",
+                onClick = onRestoreBackupClick
             )
             ProfileSettingCard(
                 icon = Icons.Default.Sync,
@@ -2520,10 +2953,14 @@ private fun ProfileSettingCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     subtitle: String,
-    status: String
+    status: String,
+    onClick: (() -> Unit)? = null
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().then(
+            if (onClick != null) Modifier.clickable { onClick() }
+            else Modifier
+        ),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         border = BorderStroke(1.dp, Color(0xFFE2EBE5))

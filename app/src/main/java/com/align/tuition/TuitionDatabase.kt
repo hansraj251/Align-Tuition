@@ -260,6 +260,12 @@ abstract class TuitionDatabase : RoomDatabase() {
     companion object {
         @Volatile private var INSTANCE: TuitionDatabase? = null
 
+        @Synchronized
+        fun closeInstance() {
+            INSTANCE?.close()
+            INSTANCE = null
+        }
+
         fun get(context: Context): TuitionDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
