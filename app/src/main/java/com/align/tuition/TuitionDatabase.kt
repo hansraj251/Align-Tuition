@@ -10,6 +10,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
@@ -77,8 +78,23 @@ data class FeePaymentEntity(
     val note: String = ""
 )
 
+
+@Entity(tableName = "app_profile")
+data class ProfileEntity(
+    @PrimaryKey val id: Int = 1,
+    val name: String = "",
+    val mobile: String = ""
+)
+
 @androidx.room.Dao
+
 interface TuitionDao {
+    @Query("SELECT * FROM app_profile WHERE id = 1 LIMIT 1")
+    fun observeProfile(): Flow<ProfileEntity?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun saveProfile(profile: ProfileEntity)
+
     @Query("SELECT * FROM students ORDER BY name COLLATE NOCASE")
     fun observeStudents(): Flow<List<StudentEntity>>
 
@@ -172,9 +188,24 @@ private val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+
+private val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS app_profile (
+                id INTEGER NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                mobile TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
+    }
+}
+
 @Database(
-    entities = [StudentEntity::class, FeePaymentEntity::class, FeeRecordEntity::class],
-    version = 5,
+    entities = [StudentEntity::class, FeePaymentEntity::class, FeeRecordEntity::class, ProfileEntity::class],
+    version = 6,
     exportSchema = false
 )
 abstract class TuitionDatabase : RoomDatabase() {
@@ -189,7 +220,7 @@ abstract class TuitionDatabase : RoomDatabase() {
                     context.applicationContext,
                     TuitionDatabase::class.java,
                     "align_tuition.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build().also { INSTANCE = it }
             }
     }
 }
