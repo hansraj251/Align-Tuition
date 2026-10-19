@@ -28,7 +28,8 @@ data class StudentEntity(
     @ColumnInfo(defaultValue = "'MONTHLY'") val feeType: String = "MONTHLY",
     @ColumnInfo(defaultValue = "''") val feeStartDate: String = "",
     @ColumnInfo(defaultValue = "''") val feeEndDate: String = "",
-    val joinedAt: Long = System.currentTimeMillis()
+    val joinedAt: Long = System.currentTimeMillis(),
+    @ColumnInfo(defaultValue = "0") val isDeleted: Boolean = false
 )
 
 
@@ -86,6 +87,11 @@ data class ProfileEntity(
     val mobile: String = ""
 )
 
+data class StudentPendingEntity(
+    val studentId: Long,
+    val pendingAmount: Long
+)
+
 @androidx.room.Dao
 
 interface TuitionDao {
@@ -95,11 +101,39 @@ interface TuitionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveProfile(profile: ProfileEntity)
 
-    @Query("SELECT * FROM students ORDER BY name COLLATE NOCASE")
+    @Query("SELECT * FROM students WHERE isDeleted = 0 ORDER BY name COLLATE NOCASE")
     fun observeStudents(): Flow<List<StudentEntity>>
+
+    @Query("SELECT * FROM students ORDER BY name COLLATE NOCASE")
+    fun observeAllStudents(): Flow<List<StudentEntity>>
 
     @Query("SELECT * FROM fee_payments ORDER BY paidAt DESC")
     fun observePayments(): Flow<List<FeePaymentEntity>>
+
+    @Query(
+        """
+        SELECT
+            s.id AS studentId,
+            MAX(
+                COALESCE(fr.totalAmount, 0) - COALESCE(fp.totalAmount, 0),
+                0
+            ) AS pendingAmount
+        FROM students AS s
+        LEFT JOIN (
+            SELECT studentId, SUM(amount) AS totalAmount
+            FROM fee_records
+            GROUP BY studentId
+        ) AS fr ON fr.studentId = s.id
+        LEFT JOIN (
+            SELECT studentId, SUM(amount) AS totalAmount
+            FROM fee_payments
+            GROUP BY studentId
+        ) AS fp ON fp.studentId = s.id
+        WHERE s.isDeleted = 0
+        GROUP BY s.id
+        """
+    )
+    fun observeStudentPendingAmounts(): Flow<List<StudentPendingEntity>>
 
     @Query("SELECT * FROM fee_records ORDER BY recordedAt DESC, id DESC")
     fun observeFeeRecords(): Flow<List<FeeRecordEntity>>
@@ -122,8 +156,11 @@ interface TuitionDao {
     @Update
     suspend fun updateStudent(student: StudentEntity)
 
-    @Delete
-    suspend fun deleteStudent(student: StudentEntity)
+    @Query("UPDATE students SET isDeleted = 1 WHERE id = :studentId")
+    suspend fun deleteStudent(studentId: Long)
+
+@Query("DELETE FROM students WHERE id = :studentId AND isDeleted = 1")
+    suspend fun permanentlyRemoveDeletedStudent(studentId: Long)
 
     @Insert
     suspend fun insertPayment(payment: FeePaymentEntity): Long
@@ -203,9 +240,18 @@ private val MIGRATION_5_6 = object : Migration(5, 6) {
     }
 }
 
+
+private val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(database: SupportSQLiteDatabase) {
+        database.execSQL(
+            "ALTER TABLE students ADD COLUMN isDeleted INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+}
+
 @Database(
     entities = [StudentEntity::class, FeePaymentEntity::class, FeeRecordEntity::class, ProfileEntity::class],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class TuitionDatabase : RoomDatabase() {
@@ -220,7 +266,7 @@ abstract class TuitionDatabase : RoomDatabase() {
                     context.applicationContext,
                     TuitionDatabase::class.java,
                     "align_tuition.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build().also { INSTANCE = it }
             }
     }
 }
