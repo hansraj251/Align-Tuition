@@ -248,10 +248,17 @@ BackHandler(
             }
         ) { padding ->
             Column(
-                Modifier.fillMaxSize().padding(padding)
+                Modifier.fillMaxSize().then(
+                    if (tab == "Profile") Modifier
+                    else if (tab == "Students") {
+                        Modifier.padding(bottom = padding.calculateBottomPadding())
+                    } else Modifier.padding(padding)
+                )
             ) {
                 Column(
-                    modifier = if (recordFeeStudent != null) {
+                    modifier = if (tab == "Profile") {
+                        Modifier.fillMaxSize().background(Page)
+                    } else if (recordFeeStudent != null) {
                         Modifier.fillMaxSize().background(Page)
                     } else if (selectedStudent != null || tab == "Students") {
                         Modifier.fillMaxSize().background(
@@ -692,7 +699,7 @@ private fun StudentsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Color(0xFF123D2F))
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 44.dp, bottom = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedTextField(
@@ -863,7 +870,7 @@ private fun StudentDetailsScreen(
         Row(
             modifier = Modifier.fillMaxWidth()
                 .background(Color(0xFF123D2F))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(start = 12.dp, top = 44.dp, end = 12.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -1153,7 +1160,7 @@ var showDeleteConfirmation by remember(student.id) { mutableStateOf(false) }
         Row(
             modifier = Modifier.fillMaxWidth()
                 .background(Color(0xFF123D2F))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(start = 12.dp, top = 44.dp, end = 12.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
@@ -2043,7 +2050,7 @@ private fun ProfileScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF123D2F))
-                .padding(horizontal = 12.dp, vertical = 12.dp),
+                .padding(start = 12.dp, end = 12.dp, top = 44.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onBack) {
