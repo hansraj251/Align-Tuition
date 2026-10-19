@@ -128,6 +128,145 @@ class MainActivity : ComponentActivity() {
     private val DRIVE_AUTH_REQUEST = 7812
     private var pendingDriveAction = "backup"
 
+    private val initialDriveSetupState =
+        androidx.compose.runtime.mutableStateOf("loading")
+    private val initialDriveSetupMessage =
+        androidx.compose.runtime.mutableStateOf("Connecting to Google Drive...")
+    private var hadLocalDatabaseBeforeStartup = false
+
+    private fun initialSetupPreferences() =
+        getSharedPreferences("tuition_initial_drive_setup", MODE_PRIVATE)
+
+    private fun isInitialDriveSetupComplete(): Boolean =
+        initialSetupPreferences().getBoolean("initial_drive_setup_complete", false)
+
+    private fun finishInitialDriveSetup(message: String) {
+        initialSetupPreferences().edit()
+            .putBoolean("initial_drive_setup_complete", true)
+            .apply()
+        initialDriveSetupMessage.value = message
+        initialDriveSetupState.value = "complete"
+    }
+
+    private fun failInitialDriveSetup(message: String) {
+        initialDriveSetupMessage.value = message
+        initialDriveSetupState.value = "error"
+        android.util.Log.e("TuitionInitialSetup", message)
+    }
+
+    private fun startInitialDriveAuthorization() {
+        if (isInitialDriveSetupComplete()) {
+            initialDriveSetupState.value = "complete"
+            return
+        }
+
+        initialDriveSetupState.value = "loading"
+        initialDriveSetupMessage.value = "Please connect your Google account..."
+        pendingDriveAction = "initial_setup"
+
+        try {
+            com.align.tuition.backup.GoogleDriveAuthorization(this)
+                .authorize()
+                .addOnSuccessListener { result ->
+                    if (result.hasResolution()) {
+                        val sender = result.pendingIntent?.intentSender
+                        if (sender == null) {
+                            failInitialDriveSetup(
+                                "Google authorization could not start. Tap Retry."
+                            )
+                        } else {
+                            try {
+                                startIntentSenderForResult(
+                                    sender, DRIVE_AUTH_REQUEST, null, 0, 0, 0
+                                )
+                            } catch (error: Exception) {
+                                failInitialDriveSetup(
+                                    "Could not open Google authorization: " +
+                                        (error.message ?: "Unknown error")
+                                )
+                            }
+                        }
+                    } else {
+                        val token = result.accessToken
+                        if (token.isNullOrBlank()) {
+                            failInitialDriveSetup(
+                                "Google returned no access token. Tap Retry."
+                            )
+                        } else {
+                            handleInitialDriveSetup(token)
+                        }
+                    }
+                }
+                .addOnFailureListener { error ->
+                    failInitialDriveSetup(
+                        "Google Drive authorization failed: " +
+                            (error.message ?: "Check your connection and retry.")
+                    )
+                }
+        } catch (error: Exception) {
+            failInitialDriveSetup(
+                "Could not connect to Google Drive: " +
+                    (error.message ?: "Unknown error")
+            )
+        }
+    }
+
+    private fun handleInitialDriveSetup(accessToken: String) {
+        initialDriveSetupState.value = "loading"
+        initialDriveSetupMessage.value = "Checking for your Google Drive backup..."
+
+        val restore = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+        restore.findBackupMetadata(accessToken) { lookup ->
+            lookup.onFailure { error ->
+                failInitialDriveSetup(
+                    "Could not check Google Drive. Your data was not reset. " +
+                        (error.message ?: "Tap Retry.")
+                )
+            }.onSuccess { metadata ->
+                if (metadata == null) {
+                    // No remote backup: complete setup and let Room create a fresh database.
+                    finishInitialDriveSetup(
+                        "No backup found. Starting with a fresh database."
+                    )
+                } else {
+                    // Drive is the source of truth: restore automatically without confirmation.
+                    initialDriveSetupState.value = "loading"
+                    initialDriveSetupMessage.value =
+                        "Backup found. Downloading and validating it..."
+
+                    restore.restore(accessToken, metadata.fileId) { download ->
+                        download.onFailure { error ->
+                            failInitialDriveSetup(
+                                "Restore failed. The app will not start with fresh data. " +
+                                    (error.message ?: "Tap Retry.")
+                            )
+                        }.onSuccess {
+                            try {
+                                TuitionDatabase.closeInstance()
+                                val safetyCopy = restore.replaceValidatedDatabase()
+                                finishInitialDriveSetup(
+                                    "Restore completed. Safety copy: ${safetyCopy.name}"
+                                )
+                                window.decorView.postDelayed({ recreate() }, 500)
+                            } catch (error: Exception) {
+                                android.util.Log.e(
+                                    "TuitionInitialSetup",
+                                    "Initial database restore failed",
+                                    error
+                                )
+                                failInitialDriveSetup(
+                                    "Restore failed. Fresh start was not selected. " +
+                                        "Check the local safety backup and retry. " +
+                                        (error.message ?: "")
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 
     @Deprecated("Deprecated in Android; retained for Drive authorization")
     override fun onActivityResult(
@@ -139,10 +278,17 @@ class MainActivity : ComponentActivity() {
         if (requestCode != DRIVE_AUTH_REQUEST) return
 
         if (resultCode != android.app.Activity.RESULT_OK || data == null) {
-            android.widget.Toast.makeText(
-                this, "Google Drive authorization cancelled",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
+            if (pendingDriveAction == "initial_setup") {
+                failInitialDriveSetup(
+                    "Google Drive connection is required. Tap Retry to connect."
+                )
+                pendingDriveAction = "backup"
+            } else {
+                android.widget.Toast.makeText(
+                    this, "Google Drive authorization cancelled",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
             return
         }
 
@@ -157,6 +303,10 @@ class MainActivity : ComponentActivity() {
             }
 
             when (pendingDriveAction) {
+                "initial_setup" -> {
+                    pendingDriveAction = "backup"
+                    handleInitialDriveSetup(token)
+                }
                 "verify" -> {
                     pendingDriveAction = "backup"
                     verifyDriveBackup(token)
@@ -168,12 +318,20 @@ class MainActivity : ComponentActivity() {
                 else -> driveCoordinator.continueManualSyncWithAccessToken(token)
             }
         } catch (error: Exception) {
+            val wasInitialSetup = pendingDriveAction == "initial_setup"
             pendingDriveAction = "backup"
-            android.widget.Toast.makeText(
-                this,
-                "Google authorization failed: ${error.message ?: error.javaClass.simpleName}",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
+            if (wasInitialSetup) {
+                failInitialDriveSetup(
+                    "Google authorization failed: " +
+                        (error.message ?: error.javaClass.simpleName)
+                )
+            } else {
+                android.widget.Toast.makeText(
+                    this,
+                    "Google authorization failed: ${error.message ?: error.javaClass.simpleName}",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
             android.util.Log.e("TuitionDriveAuth", "Authorization result failed", error)
         }
     }
@@ -360,6 +518,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Detect an existing local database before the coordinator can open/create it.
+        hadLocalDatabaseBeforeStartup =
+            getDatabasePath("align_tuition.db").exists()
+
+        initialDriveSetupState.value =
+            if (isInitialDriveSetupComplete()) "complete" else "loading"
+
         driveCoordinator = com.align.tuition.backup.GoogleDriveSyncCoordinator(
             context = applicationContext,
             authorization = com.align.tuition.backup.GoogleDriveAuthorization(this),
@@ -399,6 +564,14 @@ class MainActivity : ComponentActivity() {
                         android.widget.Toast.LENGTH_LONG
                     ).show()
                 }
+            },
+            onRemoteBackupNewer = { fileId, modifiedTime, accessToken ->
+                runOnUiThread {
+                    handleRemoteBackupNewer(fileId, modifiedTime, accessToken)
+                }
+            },
+            onRemoteCheckFinished = {
+                // A successful background check must not change the visible screen.
             }
         )
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -425,11 +598,143 @@ class MainActivity : ComponentActivity() {
                     surface = Color.White
                 )
             ) {
-                TuitionApp(
-                    onBackupClick = { driveCoordinator.requestManualSync() },
-                    onVerifyBackupClick = { startDriveVerification() },
-                    onRestoreBackupClick = { startDriveRestore() }
-                )
+                if (initialDriveSetupState.value == "complete") {
+                    TuitionApp(
+                        onBackupClick = { driveCoordinator.requestManualSync() },
+                        onVerifyBackupClick = { startDriveVerification() },
+                        onRestoreBackupClick = { startDriveRestore() },
+                        onStudentDataChanged = { driveCoordinator.requestAutoSync() }
+                    )
+                } else {
+                    InitialDriveSetupScreen(
+                        state = initialDriveSetupState.value,
+                        message = initialDriveSetupMessage.value,
+                        onRetry = {
+                            if (isInitialDriveSetupComplete()) {
+                                initialDriveSetupState.value = "loading"
+                                initialDriveSetupMessage.value = "Checking Google Drive backup..."
+                                driveCoordinator.resume()
+                            } else {
+                                startInitialDriveAuthorization()
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        // Start initial authorization only after the setup screen is installed.
+        window.decorView.post {
+            if (!isInitialDriveSetupComplete()) {
+                startInitialDriveAuthorization()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Background check only: never replace the dashboard with setup UI.
+        if (::driveCoordinator.isInitialized && isInitialDriveSetupComplete()) {
+            driveCoordinator.resume()
+        }
+    }
+
+    private fun handleRemoteBackupNewer(
+        fileId: String,
+        modifiedTime: String,
+        accessToken: String
+    ) {
+        android.util.Log.i(
+            "TuitionAutoRestore",
+            "A newer Drive backup was found; restoring in the background."
+        )
+
+        val restore = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+        restore.restore(accessToken, fileId) { result ->
+            result.onFailure { error ->
+                android.util.Log.e("TuitionAutoRestore", "Remote restore failed", error)
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this,
+                        "Drive update could not be restored. Local data was kept.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }.onSuccess {
+                try {
+                    TuitionDatabase.closeInstance()
+                    val safetyCopy = restore.replaceValidatedDatabase()
+                    driveCoordinator.markRemoteBackupSynced(modifiedTime)
+                    runOnUiThread {
+                        android.widget.Toast.makeText(
+                            this,
+                            "Data updated from Google Drive.",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        window.decorView.postDelayed({ recreate() }, 500)
+                    }
+                } catch (error: Exception) {
+                    android.util.Log.e("TuitionAutoRestore", "Database replacement failed", error)
+                    runOnUiThread {
+                        android.widget.Toast.makeText(
+                            this,
+                            "Drive restore failed. Check the local safety copy.",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InitialDriveSetupScreen(
+    state: String,
+    message: String,
+    onRetry: () -> Unit
+) {
+    androidx.activity.compose.BackHandler(enabled = true) {
+        // The initial Google Drive setup cannot be bypassed with the Back button.
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Page)
+            .padding(28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.CloudUpload,
+            contentDescription = null,
+            tint = Green,
+            modifier = Modifier.size(64.dp)
+        )
+        Spacer(Modifier.height(20.dp))
+        Text(
+            text = "Connect Google Drive",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = Ink
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = message,
+            fontSize = 15.sp,
+            color = Muted,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(24.dp))
+        if (state == "loading") {
+            CircularProgressIndicator(color = Green)
+        } else {
+            Button(
+                onClick = onRetry,
+                colors = ButtonDefaults.buttonColors(containerColor = Green)
+            ) {
+                Text("Retry / Connect Google Drive")
             }
         }
     }
@@ -439,7 +744,8 @@ class MainActivity : ComponentActivity() {
 private fun TuitionApp(
     onBackupClick: () -> Unit,
     onVerifyBackupClick: () -> Unit,
-    onRestoreBackupClick: () -> Unit
+    onRestoreBackupClick: () -> Unit,
+    onStudentDataChanged: () -> Unit
 ) {
     val context = LocalContext.current
     val dao = remember { TuitionDatabase.get(context).tuitionDao() }
@@ -460,6 +766,7 @@ val collection = monthPayments.sumOf { it.amount }
     val pending = (feeRecords.sumOf { it.amount } - payments.sumOf { it.amount }).coerceAtLeast(0L)
 
     var tab by remember { mutableStateOf("Dashboard") }
+    var legalPage by remember { mutableStateOf<String?>(null) }
         var pendingOnly by remember { mutableStateOf(false) }
 var showStudentEditor by remember { mutableStateOf(false) }
     var studentToEdit by remember { mutableStateOf<StudentEntity?>(null) }
@@ -472,8 +779,9 @@ var showStudentEditor by remember { mutableStateOf(false) }
     var studentToRemoveFromCollection by remember { mutableStateOf<StudentEntity?>(null) }
 
 BackHandler(
-        enabled = recordFeeStudent != null || selectedStudent != null || tab == "Profile" || tab == "Collection") {
+        enabled = legalPage != null || recordFeeStudent != null || selectedStudent != null || tab == "Profile" || tab == "Collection") {
         when {
+            legalPage != null -> legalPage = null
             recordFeeStudent != null -> recordFeeStudent = null
             selectedStudent != null -> {
                 selectedStudent = null
@@ -559,7 +867,12 @@ BackHandler(
                             .padding(horizontal = 8.dp, vertical = 8.dp)
                     }
                 ) {
-                    if (recordFeeStudent != null) {
+                    if (legalPage != null) {
+                        LegalDocumentScreen(
+                            documentType = legalPage!!,
+                            onBack = { legalPage = null }
+                        )
+                    } else if (recordFeeStudent != null) {
                     val feeStudent = recordFeeStudent!!
                     RecordFeeScreen(
                         student = feeStudent,
@@ -573,11 +886,13 @@ BackHandler(
                                 dao.updateFeeRecord(record)
                                 record
                             }
+                            onStudentDataChanged()
                             selectedStudent = updatedStudent
                             savedRecord
                         },
                         onDelete = { record ->
                             dao.deleteFeeRecord(record)
+                            onStudentDataChanged()
                         }
                     )
                 } else if (selectedStudent != null) {
@@ -614,6 +929,9 @@ BackHandler(
                         onBackupClick = onBackupClick,
                         onVerifyBackupClick = onVerifyBackupClick,
                         onRestoreBackupClick = onRestoreBackupClick,
+                        onPrivacyPolicyClick = { legalPage = "Privacy Policy" },
+                        onTermsClick = { legalPage = "Terms & Conditions" },
+                        onStudentDataChanged = onStudentDataChanged,
                         modifier = Modifier.weight(1f),
                         profile = profile,
                         onBack = { tab = "Dashboard" },
@@ -697,6 +1015,7 @@ BackHandler(
                         } else {
                             dao.updateStudent(item)
                         }
+                        onStudentDataChanged()
                     }
                     if (selectedStudent?.id == item.id) selectedStudent = item
                     showStudentEditor = false
@@ -712,6 +1031,7 @@ BackHandler(
                 onSave = { payment ->
                     scope.launch {
                         dao.insertPayment(payment)
+                        onStudentDataChanged()
                         paymentHistoryRefreshKey++
                         studentToCollect = null
                         selectedStudent = null
@@ -732,6 +1052,7 @@ BackHandler(
                     onSave = { updated ->
                         scope.launch {
                             dao.updatePayment(updated)
+                            onStudentDataChanged()
                             paymentHistoryRefreshKey++
                             paymentToEdit = null
                             selectedStudent = null
@@ -776,6 +1097,7 @@ BackHandler(
                             onClick = {
                                 scope.launch {
                                     dao.deletePayment(payment)
+                                    onStudentDataChanged()
                                     paymentHistoryRefreshKey++
                                     paymentToDelete = null
                                     selectedStudent = null
@@ -811,6 +1133,7 @@ BackHandler(
                     TextButton(onClick = {
                         scope.launch {
                             dao.permanentlyRemoveDeletedStudent(archivedStudent.id)
+                            onStudentDataChanged()
                         }
                         studentToRemoveFromCollection = null
                     }) { Text("Remove", color = Color(0xFFB3261E)) }
@@ -834,7 +1157,10 @@ BackHandler(
                 },
                 confirmButton = {
                     TextButton(onClick = {
-                        scope.launch { dao.deleteStudent(student.id) }
+                        scope.launch {
+                            dao.deleteStudent(student.id)
+                            onStudentDataChanged()
+                        }
                         studentToDelete = null
                     }) { Text("Delete", color = Color(0xFFB3261E)) }
                 },
@@ -2749,7 +3075,10 @@ private fun ProfileScreen(
     onSave: (String, String) -> Unit,
     onBackupClick: () -> Unit,
     onVerifyBackupClick: () -> Unit,
-    onRestoreBackupClick: () -> Unit
+    onRestoreBackupClick: () -> Unit,
+    onPrivacyPolicyClick: () -> Unit,
+    onTermsClick: () -> Unit,
+    onStudentDataChanged: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var name by remember(profile?.name) { mutableStateOf(profile?.name.orEmpty()) }
@@ -2877,6 +3206,7 @@ private fun ProfileScreen(
                     Button(
                         onClick = {
                             onSave(name.trim(), mobile.trim())
+                            onStudentDataChanged()
                             savedMessage = true
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -2903,47 +3233,30 @@ private fun ProfileScreen(
                 fontWeight = FontWeight.Bold
             )
 
-            ProfileSettingCard(
-                icon = Icons.Default.CloudUpload,
-                title = "Backup & Restore",
-                subtitle = "Protect your tuition data",
-                status = "Back up now",
-                onClick = onBackupClick
-            )
 
-            ProfileSettingCard(
-                icon = Icons.Default.CloudUpload,
-                title = "Verify Backup",
-                subtitle = "Check whether the backup file exists in Google Drive",
-                status = "Check now",
-                onClick = onVerifyBackupClick
-            )
 
-            ProfileSettingCard(
-                icon = Icons.Default.CloudUpload,
-                title = "Restore from Google Drive",
-                subtitle = "Download a backup and restore tuition data",
-                status = "Restore",
-                onClick = onRestoreBackupClick
-            )
-            ProfileSettingCard(
-                icon = Icons.Default.Sync,
-                title = "Sync Settings",
-                subtitle = "Manage future data synchronization",
-                status = "Coming soon"
-            )
-            ProfileSettingCard(
-                icon = Icons.Default.Security,
-                title = "Privacy & Security",
-                subtitle = "Account and data protection",
-                status = "Coming soon"
-            )
+
+
+
+
             ProfileSettingCard(
                 icon = Icons.Default.Settings,
-                title = "App Information",
-                subtitle = "Align Tuition",
-                status = "Version 1.0.0"
+                title = "Privacy Policy",
+                subtitle = "How Align Tuition handles your data",
+                status = "Read",
+                onClick = onPrivacyPolicyClick
             )
+
+            ProfileSettingCard(
+                icon = Icons.Default.Settings,
+                title = "Terms & Conditions",
+                subtitle = "Terms for using Align Tuition",
+                status = "Read",
+                onClick = onTermsClick
+            )
+
+
+
         }
     }
 }
@@ -2985,5 +3298,89 @@ private fun ProfileSettingCard(
             }
             Text(status, color = Muted, fontSize = 10.sp)
         }
+    }
+}
+
+
+@Composable
+private fun LegalDocumentScreen(
+    documentType: String,
+    onBack: () -> Unit
+) {
+    val isPrivacy = documentType == "Privacy Policy"
+    val title = if (isPrivacy) "Privacy Policy" else "Terms & Conditions"
+
+    Column(modifier = Modifier.fillMaxSize().background(Page)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF123D2F))
+                .padding(start = 8.dp, end = 16.dp, top = 40.dp, bottom = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
+                )
+            }
+            Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Column(
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text("Align Tuition", fontSize = 23.sp, fontWeight = FontWeight.Bold, color = Color(0xFF123D2F))
+            Text("Effective date: 19 October 2026", fontSize = 12.sp, color = Muted)
+
+            if (isPrivacy) {
+                LegalSection("1. Introduction",
+                    "This Privacy Policy explains how AlignOS handles information when you use Align Tuition. For privacy questions, contact alignos.in@gmail.com.")
+                LegalSection("2. Information stored",
+                    "Information you enter may include your profile name and mobile number, student details, fee records, and fee collection or payment records. Please avoid entering information that is not needed for your tuition-management work.")
+                LegalSection("3. Local storage",
+                    "Tuition records are stored in the app's local database on your device. Anyone who can access your unlocked device or app data may be able to access those records. Keep your device secure.")
+                LegalSection("4. Google Drive backup and restore",
+                    "If you choose to use Google Drive backup, the app uses Google authorization to access backup functionality. The backup may contain student, fee, collection, and profile records. Restoring a backup can replace current app data. Keep a separate copy of important records before restoring.")
+                LegalSection("5. Sharing and service providers",
+                    "The app does not require you to create an Align Tuition online account. Google Drive features involve Google services under Google's own terms and privacy policy. Any additional analytics, advertising, or crash-reporting services, if added, must be disclosed according to their actual behavior.")
+                LegalSection("6. Retention and deletion",
+                    "Records may remain on your device until you delete them or remove the app and its data. A backup previously created in Google Drive may remain there even after local records are deleted; manage backup files through the applicable Google Drive controls.")
+                LegalSection("7. Security and changes",
+                    "Use device security features and protect access to your Google account. No method of storage or transfer can be guaranteed completely secure. This policy may be updated when the app's features or data practices change.")
+                LegalSection("8. Contact",
+                    "Publisher: AlignOS\nEmail: alignos.in@gmail.com")
+            } else {
+                LegalSection("1. Acceptance and purpose",
+                    "Align Tuition is intended to help users manage tuition-related student information, fees, and collections. By using the app, you agree to use it lawfully and responsibly.")
+                LegalSection("2. Your records and responsibilities",
+                    "You are responsible for the accuracy, legality, and appropriate use of information entered into the app. Check fee entries, collections, and reports carefully. The app should not be treated as a substitute for maintaining any records required by law.")
+                LegalSection("3. Device and backup responsibility",
+                    "You are responsible for securing your device and Google account, where used. Backup availability depends on successful authorization, network access, Google services, and the backup process. Verify important backups and retain independent copies of critical records.")
+                LegalSection("4. Restore operations",
+                    "Restoring a backup may replace current app data. Review the selected backup carefully before proceeding. AlignOS is not responsible for data loss caused by an incorrect restore, device failure, account loss, or a backup that was not successfully completed.")
+                LegalSection("5. Acceptable use",
+                    "Do not use the app for unlawful activity, unauthorized access, or misuse of another person's information. You must have an appropriate basis and permission to enter and manage student information.")
+                LegalSection("6. Availability and changes",
+                    "Features may change, be interrupted, or become unavailable. We will make reasonable efforts to maintain the app, but uninterrupted operation and error-free storage cannot be guaranteed.")
+                LegalSection("7. Disclaimer and liability",
+                    "To the extent permitted by applicable law, the app is provided without a guarantee that it will meet every requirement or remain continuously available. Nothing in these terms excludes liability that cannot lawfully be excluded.")
+                LegalSection("8. Intellectual property",
+                    "The app's software, branding, and associated materials belong to their respective owners and may not be copied or misused except as permitted by law.")
+                LegalSection("9. Governing law and contact",
+                    "These terms are subject to applicable laws of India. Any legal rights available to you under applicable law remain unaffected. Publisher: AlignOS. Contact: alignos.in@gmail.com.")
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun LegalSection(heading: String, body: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(heading, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF123D2F))
+        Text(body, fontSize = 14.sp, lineHeight = 21.sp, color = Color(0xFF34423B))
     }
 }

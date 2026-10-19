@@ -16,9 +16,11 @@ class GoogleDriveSyncCoordinator(
     private val onSyncSuccess: (() -> Unit)? = null,
     private val onSyncFailure: ((Throwable) -> Unit)? = null,
     private val onRemoteBackupNewer:
-        ((String, String, String) -> Unit)? = null
+        ((String, String, String) -> Unit)? = null,
+    private val onRemoteCheckFinished: (() -> Unit)? = null
 ) {
     companion object {
+        private const val AUTO_SYNC_DEBOUNCE_MS = 2500L
         private const val PREFS_NAME = "tuition_google_drive_sync"
         private const val PENDING_GENERATION = "pending_generation"
         private const val COMPLETED_GENERATION = "completed_generation"
@@ -54,8 +56,16 @@ class GoogleDriveSyncCoordinator(
     private var running = false
     private var paused = false
 
-    fun requestAutoSync() {
+    private val autoSyncHandler =
+        android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val autoSyncRunnable = Runnable {
         requestSync(manual = false)
+    }
+
+    fun requestAutoSync() {
+        autoSyncHandler.removeCallbacks(autoSyncRunnable)
+        autoSyncHandler.postDelayed(autoSyncRunnable, AUTO_SYNC_DEBOUNCE_MS)
     }
 
     fun requestManualSync() {
@@ -139,7 +149,7 @@ class GoogleDriveSyncCoordinator(
                                 }
 
                             if (
-                                local != null &&
+                                local == null ||
                                 remote.isAfter(local)
                             ) {
                                 synchronized(lock) {
@@ -177,6 +187,8 @@ class GoogleDriveSyncCoordinator(
             startPendingSync &&
                 generation.get() > completedGeneration
         }
+
+        onRemoteCheckFinished?.invoke()
 
         if (shouldStart) {
             synchronized(lock) {
