@@ -1,5 +1,7 @@
 package com.align.tuition
 
+import com.align.tuition.backup.DriveAccountBinding
+
 import java.time.format.DateTimeFormatter
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenu
@@ -213,7 +215,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun captureDriveAccountIdentity(accessToken: String) {
+        lifetimePremiumBilling?.invalidatePremium()
+        DriveAccountBinding.capture(applicationContext, accessToken) {
+            runOnUiThread {
+                lifetimePremiumBilling?.restorePurchases()
+            }
+        }
+    }
+
     private fun handleInitialDriveSetup(accessToken: String) {
+        captureDriveAccountIdentity(accessToken)
         initialDriveSetupState.value = "loading"
         initialDriveSetupMessage.value = "Checking for your Google Drive backup..."
 
@@ -317,7 +329,10 @@ class MainActivity : ComponentActivity() {
                     pendingDriveAction = "backup"
                     findAndConfirmRestore(token)
                 }
-                else -> driveCoordinator.continueManualSyncWithAccessToken(token)
+                else -> {
+                    captureDriveAccountIdentity(token)
+                    driveCoordinator.continueManualSyncWithAccessToken(token)
+                }
             }
         } catch (error: Exception) {
             val wasInitialSetup = pendingDriveAction == "initial_setup"
@@ -434,6 +449,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun findAndConfirmRestore(accessToken: String) {
+        captureDriveAccountIdentity(accessToken)
         val restore = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
         showDriveMessage("Finding Google Drive backup...")
         restore.findBackupMetadata(accessToken) { result ->
@@ -485,6 +501,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun verifyDriveBackup(accessToken: String) {
+        captureDriveAccountIdentity(accessToken)
         showDriveMessage("Checking Google Drive backup...")
         com.align.tuition.backup.GoogleDriveRestore(applicationContext)
             .findBackupMetadata(accessToken) { result ->
@@ -676,6 +693,7 @@ class MainActivity : ComponentActivity() {
         modifiedTime: String,
         accessToken: String
     ) {
+        captureDriveAccountIdentity(accessToken)
         android.util.Log.i(
             "TuitionAutoRestore",
             "A newer Drive backup was found; restoring in the background."
@@ -782,6 +800,10 @@ private fun TuitionApp(
     onPurchasePremiumClick: () -> Unit
 ) {
     val context = LocalContext.current
+    SideEffect {
+        appCurrencyCode = selectedTuitionCurrency(context).code
+    }
+
     val dao = remember { TuitionDatabase.get(context).tuitionDao() }
     val scope = rememberCoroutineScope()
     val students by dao.observeStudents().collectAsState(initial = emptyList())
@@ -994,6 +1016,7 @@ BackHandler(
                         onPrivacyPolicyClick = { legalPage = "Privacy Policy" },
                         onTermsClick = { legalPage = "Terms & Conditions" },
                         onUnlockPremiumClick = { showPremiumDialog = true },
+                        isPremium = isPremium,
                         onStudentDataChanged = onStudentDataChanged,
                         modifier = Modifier.weight(1f),
                         profile = profile,
@@ -1054,6 +1077,7 @@ BackHandler(
                         pending = pending,
                         monthKey = currentMonth,
                         profileName = profile?.name.orEmpty(),
+                        isPremium = isPremium,
                         onProfileClick = { tab = "Profile" }
                     ,
                         onPendingFeesClick = { pendingOnly = true; tab = "Students" },
@@ -1066,28 +1090,61 @@ BackHandler(
         if (showPremiumDialog) {
             AlertDialog(
                 onDismissRequest = { showPremiumDialog = false },
-                title = { Text("Unlock Premium") },
+                containerColor = Color.White,
+                tonalElevation = 0.dp,
+                title = {
+                    Text(
+                        "Unlock Premium",
+                        color = Color(0xFF123D2F),
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                },
                 text = {
                     Text(
-                        "The Free plan allows up to 2 active students. " +
-                        "Premium will unlock more students and additional features."
+                        "The Free plan allows up to 2 active students. Premium lets you add unlimited students.",
+                        color = Color(0xFF52635A),
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                 },
                 confirmButton = {
-                    TextButton(
-                        onClick = {
-                            showPremiumDialog = false
-                            onPurchasePremiumClick()
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Buy Lifetime Premium")
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = {
+                                showPremiumDialog = false
+                                onPurchasePremiumClick()
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Green),
+                            colors = androidx.compose.material3.ButtonDefaults
+                                .outlinedButtonColors(contentColor = Green)
+                        ) {
+                            Text(
+                                "Premium",
+                                fontSize = 11.sp,
+                                maxLines = 2
+                            )
+                        }
+
+                        androidx.compose.material3.OutlinedButton(
+                            onClick = { showPremiumDialog = false },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Green),
+                            colors = androidx.compose.material3.ButtonDefaults
+                                .outlinedButtonColors(contentColor = Ink)
+                        ) {
+                            Text("Not now", fontSize = 12.sp, maxLines = 1)
+                        }
                     }
                 },
-                dismissButton = {
-                    TextButton(onClick = { showPremiumDialog = false }) {
-                        Text("Not now")
-                    }
-                }
+                dismissButton = {}
             )
         }
 
@@ -1281,6 +1338,7 @@ private fun DashboardScreen(
     pending: Long,
     monthKey: String,
     profileName: String,
+    isPremium: Boolean,
     onProfileClick: () -> Unit,
     onPendingFeesClick: () -> Unit,
     onCollectionClick: () -> Unit
@@ -1306,8 +1364,8 @@ private fun DashboardScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    profileName.ifBlank { "Profile & Settings" },
-                    color = Muted,
+                    profileName,
+                    color = if (isPremium) Color(0xFFFFD76A) else Muted,
                     fontSize = 13.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -2580,10 +2638,10 @@ var showDeleteConfirmation by remember(student.id) { mutableStateOf(false) }
                     onValueChange = { feeText = it; error = "" },
                     label = {
                         Text(
-                            if (entryKind == "OTHER") "Amount (₹) *" else when (feeType) {
-                                "YEARLY" -> "Yearly fee (₹) *"
-                                "DATE_RANGE" -> "Total period fee (₹) *"
-                                else -> "Monthly fee (₹) *"
+                            if (entryKind == "OTHER") "Amount (${selectedTuitionCurrency(context).symbol}) *" else when (feeType) {
+                                "YEARLY" -> "Yearly fee (${selectedTuitionCurrency(context).symbol}) *"
+                                "DATE_RANGE" -> "Total period fee (${selectedTuitionCurrency(context).symbol}) *"
+                                else -> "Monthly fee (${selectedTuitionCurrency(context).symbol}) *"
                             }
                         )
                     },
@@ -3065,7 +3123,7 @@ private fun PaymentDialog(
                             error = ""
                         },
                         modifier = Modifier.weight(1f),
-                        label = { Text("Amount (₹)") },
+                        label = { Text("Amount (${selectedTuitionCurrency(LocalContext.current).symbol})") },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
                         keyboardOptions = KeyboardOptions(
@@ -3248,8 +3306,40 @@ private fun EmptyState(title: String, message: String) {
     }
 }
 
-private fun rupees(amount: Long): String =
-    "₹" + "%,d".format(Locale("en", "IN"), amount)
+private data class TuitionCurrency(
+    val code: String,
+    val symbol: String,
+    val label: String,
+    val locale: Locale
+)
+
+private val tuitionCurrencies = listOf(
+    TuitionCurrency("INR", "₹", "Indian Rupee (INR)", Locale("en", "IN")),
+    TuitionCurrency("USD", "$", "US Dollar (USD)", Locale.US),
+    TuitionCurrency("EUR", "€", "Euro (EUR)", Locale.GERMANY),
+    TuitionCurrency("GBP", "£", "British Pound (GBP)", Locale.UK),
+    TuitionCurrency("AED", "د.إ", "UAE Dirham (AED)", Locale("en", "AE")),
+    TuitionCurrency("CAD", "C$", "Canadian Dollar (CAD)", Locale.CANADA),
+    TuitionCurrency("AUD", "A$", "Australian Dollar (AUD)", Locale("en", "AU"))
+)
+
+private const val CURRENCY_PREFS = "tuition_preferences"
+private const val CURRENCY_KEY = "display_currency"
+private var appCurrencyCode by mutableStateOf("INR")
+
+
+private fun selectedTuitionCurrency(context: android.content.Context): TuitionCurrency {
+    val code = context.getSharedPreferences(CURRENCY_PREFS, 0)
+        .getString(CURRENCY_KEY, "INR")
+    return tuitionCurrencies.firstOrNull { it.code == code } ?: tuitionCurrencies.first()
+}
+
+private fun rupees(amount: Long): String {
+    val currencyCode = appCurrencyCode
+    val currency = tuitionCurrencies.firstOrNull { it.code == currencyCode }
+        ?: tuitionCurrencies.first()
+    return currency.symbol + "%,d".format(currency.locale, amount)
+}
 
 private fun dateText(timestamp: Long): String =
     SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(timestamp))
@@ -3267,9 +3357,13 @@ private fun ProfileScreen(
     onPrivacyPolicyClick: () -> Unit,
     onTermsClick: () -> Unit,
     onUnlockPremiumClick: () -> Unit,
-    onStudentDataChanged: () -> Unit
+    onStudentDataChanged: () -> Unit,
+    isPremium: Boolean
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    SideEffect {
+        appCurrencyCode = selectedTuitionCurrency(context).code
+    }
     var name by remember(profile?.name) { mutableStateOf(profile?.name.orEmpty()) }
     var mobile by remember(profile?.mobile) { mutableStateOf(profile?.mobile.orEmpty()) }
     var savedMessage by remember { mutableStateOf(false) }
@@ -3318,36 +3412,65 @@ private fun ProfileScreen(
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF176B4D))
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        modifier = Modifier.size(66.dp),
-                        shape = RoundedCornerShape(22.dp),
-                        color = Color.White
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                            .padding(end = 76.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
+                        Surface(
+                            modifier = Modifier.size(66.dp),
+                            shape = RoundedCornerShape(22.dp),
+                            color = Color.White
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "P",
+                                    color = Color(0xFF176B4D),
+                                    fontSize = 27.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
                             Text(
-                                name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "P",
-                                color = Color(0xFF176B4D),
-                                fontSize = 27.sp,
-                                fontWeight = FontWeight.ExtraBold
+                                name.ifBlank { "Your Profile" },
+                                color = Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                mobile.ifBlank { "Add your mobile number" },
+                                color = Color(0xFFD9EEE4),
+                                fontSize = 14.sp
                             )
                         }
                     }
-                    Spacer(Modifier.width(16.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 20.dp, end = 20.dp),
+                        shape = RoundedCornerShape(50),
+                        color = if (isPremium) Color(0xFFFFD76A)
+                                else Color.White.copy(alpha = 0.18f)
+                    ) {
                         Text(
-                            name.ifBlank { "Your Profile" },
-                            color = Color.White,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            mobile.ifBlank { "Add your mobile number" },
-                            color = Color(0xFFD9EEE4),
-                            fontSize = 14.sp
+                            if (isPremium) "Premium" else "Free User",
+                            modifier = Modifier.padding(
+                                horizontal = 10.dp,
+                                vertical = 6.dp
+                            ),
+                            color = if (isPremium) Color(0xFF6B3F12) else Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
                         )
                     }
                 }
@@ -3428,13 +3551,63 @@ private fun ProfileScreen(
 
 
 
-            ProfileSettingCard(
-                icon = Icons.Default.Settings,
-                title = "Unlock Premium",
-                subtitle = "Unlock more students and premium features",
-                status = "Explore",
-                onClick = onUnlockPremiumClick
-            )
+            var selectedCurrencyCode by remember {
+                mutableStateOf(selectedTuitionCurrency(context).code)
+            }
+            var currencyMenuExpanded by remember { mutableStateOf(false) }
+            val selectedCurrency = tuitionCurrencies.first {
+                it.code == selectedCurrencyCode
+            }
+
+            Box(modifier = Modifier.fillMaxWidth()) {
+                ProfileSettingCard(
+                    icon = Icons.Default.Settings,
+                    title = "Currency Setting",
+                    subtitle = selectedCurrency.label,
+                    status = "Change",
+                    onClick = { currencyMenuExpanded = true }
+                )
+                DropdownMenu(
+                    expanded = currencyMenuExpanded,
+                    onDismissRequest = { currencyMenuExpanded = false },
+                    modifier = Modifier.background(Color.White)
+                ) {
+                    tuitionCurrencies.forEach { currency ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "${currency.symbol}  ${currency.label}",
+                                    color = Ink
+                                )
+                            },
+                            onClick = {
+                                context.getSharedPreferences(CURRENCY_PREFS, 0)
+                                    .edit()
+                                    .putString(CURRENCY_KEY, currency.code)
+                                    .apply()
+                                appCurrencyCode = currency.code
+                                selectedCurrencyCode = currency.code
+                                currencyMenuExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = Color.White,
+                border = BorderStroke(1.dp, Color(0xFFD9E5DE))
+            ) {
+                ProfileSettingCard(
+                    icon = Icons.Default.Settings,
+                    title = "Unlock Premium",
+                    subtitle = "Add unlimited students.",
+                    status = "Explore",
+                    onClick = onUnlockPremiumClick
+                )
+            }
 
             ProfileSettingCard(
                 icon = Icons.Default.Settings,
@@ -3467,13 +3640,16 @@ private fun ProfileSettingCard(
     onClick: (() -> Unit)? = null
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().then(
-            if (onClick != null) Modifier.clickable { onClick() }
-            else Modifier
-        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White, RoundedCornerShape(18.dp))
+            .then(
+                if (onClick != null) Modifier.clickable { onClick() }
+                else Modifier
+            ),
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = BorderStroke(1.dp, Color(0xFFE2EBE5))
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFFFF)),
+        border = BorderStroke(1.5.dp, if (title == "Unlock Premium") Color(0xFF16805D) else Color(0xFFE2EBE5))
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(15.dp),
