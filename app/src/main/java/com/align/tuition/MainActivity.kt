@@ -127,6 +127,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var driveCoordinator: com.align.tuition.backup.GoogleDriveSyncCoordinator
     private val DRIVE_AUTH_REQUEST = 7812
     private var pendingDriveAction = "backup"
+    private val lifetimePremiumState = androidx.compose.runtime.mutableStateOf(false)
+    private var lifetimePremiumBilling: LifetimePremiumBilling? = null
 
     private val initialDriveSetupState =
         androidx.compose.runtime.mutableStateOf("loading")
@@ -574,6 +576,20 @@ class MainActivity : ComponentActivity() {
                 // A successful background check must not change the visible screen.
             }
         )
+        lifetimePremiumBilling = LifetimePremiumBilling(
+            context = applicationContext,
+            onPremiumChanged = { enabled ->
+                runOnUiThread { lifetimePremiumState.value = enabled }
+            },
+            onMessage = { message ->
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this, message, android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
         } else {
@@ -603,7 +619,16 @@ class MainActivity : ComponentActivity() {
                         onBackupClick = { driveCoordinator.requestManualSync() },
                         onVerifyBackupClick = { startDriveVerification() },
                         onRestoreBackupClick = { startDriveRestore() },
-                        onStudentDataChanged = { driveCoordinator.requestAutoSync() }
+                        onStudentDataChanged = { driveCoordinator.requestAutoSync() },
+                        isPremium = lifetimePremiumState.value,
+                        onPurchasePremiumClick = {
+                            lifetimePremiumBilling?.launchPurchase(this)
+                                ?: android.widget.Toast.makeText(
+                                    this,
+                                    "Google Play Billing is still connecting.",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                        }
                     )
                 } else {
                     InitialDriveSetupScreen(
@@ -633,10 +658,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        lifetimePremiumBilling?.connect()
         // Background check only: never replace the dashboard with setup UI.
         if (::driveCoordinator.isInitialized && isInitialDriveSetupComplete()) {
             driveCoordinator.resume()
         }
+    }
+
+    override fun onDestroy() {
+        lifetimePremiumBilling?.close()
+        lifetimePremiumBilling = null
+        super.onDestroy()
     }
 
     private fun handleRemoteBackupNewer(
@@ -745,7 +777,9 @@ private fun TuitionApp(
     onBackupClick: () -> Unit,
     onVerifyBackupClick: () -> Unit,
     onRestoreBackupClick: () -> Unit,
-    onStudentDataChanged: () -> Unit
+    onStudentDataChanged: () -> Unit,
+    isPremium: Boolean,
+    onPurchasePremiumClick: () -> Unit
 ) {
     val context = LocalContext.current
     val dao = remember { TuitionDatabase.get(context).tuitionDao() }
@@ -770,6 +804,7 @@ val collection = monthPayments.sumOf { it.amount }
         var pendingOnly by remember { mutableStateOf(false) }
 var showStudentEditor by remember { mutableStateOf(false) }
     var studentToEdit by remember { mutableStateOf<StudentEntity?>(null) }
+    var showPremiumDialog by remember { mutableStateOf(false) }
     var selectedStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var recordFeeStudent by remember { mutableStateOf<StudentEntity?>(null) }
     var studentToCollect by remember { mutableStateOf<StudentEntity?>(null) }
@@ -779,13 +814,23 @@ var showStudentEditor by remember { mutableStateOf(false) }
     var studentToRemoveFromCollection by remember { mutableStateOf<StudentEntity?>(null) }
 
 BackHandler(
-        enabled = legalPage != null || recordFeeStudent != null || selectedStudent != null || tab == "Profile" || tab == "Collection") {
+        enabled = legalPage != null ||
+            recordFeeStudent != null ||
+            selectedStudent != null ||
+            tab == "Students" ||
+            tab == "Profile" ||
+            tab == "Collection"
+    ) {
         when {
             legalPage != null -> legalPage = null
             recordFeeStudent != null -> recordFeeStudent = null
             selectedStudent != null -> {
                 selectedStudent = null
                 tab = "Students"
+            }
+            tab == "Students" -> {
+                pendingOnly = false
+                tab = "Dashboard"
             }
             tab == "Collection" -> tab = "Dashboard"
             tab == "Profile" -> tab = "Dashboard"
@@ -824,9 +869,26 @@ BackHandler(
                     )
                     NavigationBarItem(
                         selected = tab == "Students",
-                        onClick = { pendingOnly = false; tab = "Students" },
-                        icon = { Icon(Icons.Default.People, null) },
-                        label = { Text("Students") },
+                        onClick = {
+                            if (tab == "Students") {
+                                pendingOnly = false
+                                studentToEdit = null
+                                showStudentEditor = true
+                            } else {
+                                pendingOnly = false
+                                tab = "Students"
+                            }
+                        },
+                        icon = {
+                            Icon(
+                                if (tab == "Students") Icons.Default.PersonAdd
+                                else Icons.Default.People,
+                                contentDescription = null
+                            )
+                        },
+                        label = {
+                            Text(if (tab == "Students") "Add Student" else "Students")
+                        },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = Color.White,
                             selectedTextColor = Green,
@@ -931,6 +993,7 @@ BackHandler(
                         onRestoreBackupClick = onRestoreBackupClick,
                         onPrivacyPolicyClick = { legalPage = "Privacy Policy" },
                         onTermsClick = { legalPage = "Terms & Conditions" },
+                        onUnlockPremiumClick = { showPremiumDialog = true },
                         onStudentDataChanged = onStudentDataChanged,
                         modifier = Modifier.weight(1f),
                         profile = profile,
@@ -987,8 +1050,8 @@ BackHandler(
                         modifier = Modifier.weight(1f),
                         studentCount = students.size,
                         collection = collection,
+                        payments = payments,
                         pending = pending,
-                        totalFees = students.sumOf { it.monthlyFee },
                         monthKey = currentMonth,
                         profileName = profile?.name.orEmpty(),
                         onProfileClick = { tab = "Profile" }
@@ -998,6 +1061,34 @@ BackHandler(
 )
                 }
             }
+        }
+
+        if (showPremiumDialog) {
+            AlertDialog(
+                onDismissRequest = { showPremiumDialog = false },
+                title = { Text("Unlock Premium") },
+                text = {
+                    Text(
+                        "The Free plan allows up to 2 active students. " +
+                        "Premium will unlock more students and additional features."
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showPremiumDialog = false
+                            onPurchasePremiumClick()
+                        }
+                    ) {
+                        Text("Buy Lifetime Premium")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showPremiumDialog = false }) {
+                        Text("Not now")
+                    }
+                }
+            )
         }
 
         if (showStudentEditor) {
@@ -1011,14 +1102,20 @@ BackHandler(
                 onSave = { item ->
                     scope.launch {
                         if (item.id == 0L) {
+                            if (!isPremium && students.count { !it.isDeleted } >= 2) {
+                                showPremiumDialog = true
+                                return@launch
+                            }
                             dao.insertStudent(item)
                         } else {
                             dao.updateStudent(item)
                         }
                         onStudentDataChanged()
+                        showStudentEditor = false
                     }
-                    if (selectedStudent?.id == item.id) selectedStudent = item
-                    showStudentEditor = false
+                    if (item.id != 0L && selectedStudent?.id == item.id) {
+                        selectedStudent = item
+                    }
                 }
             )
         }
@@ -1180,8 +1277,8 @@ private fun DashboardScreen(
     modifier: Modifier,
     studentCount: Int,
     collection: Long,
+    payments: List<FeePaymentEntity>,
     pending: Long,
-    totalFees: Long,
     monthKey: String,
     profileName: String,
     onProfileClick: () -> Unit,
@@ -1252,20 +1349,118 @@ private fun DashboardScreen(
             )
         }
 
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        var yearlyCollection by remember { mutableStateOf(false) }
+        var collectionPeriod by remember { mutableStateOf(YearMonth.now()) }
+        var collectionYear by remember { mutableStateOf(YearMonth.now().year) }
+
+        val displayedCollection = remember(
+            payments, yearlyCollection, collectionPeriod, collectionYear
         ) {
-            DashboardMetricCard(
-                "Total Collection", rupees(collection),
-                Color(0xFF245BB5), Color(0xFFE5EFFD), Modifier.weight(1f),
-                "This month", onClick = onCollectionClick
-            )
-            DashboardMetricCard(
-                "Total Fees", rupees(totalFees),
-                Color(0xFF7442AD), Color(0xFFF0E8FC), Modifier.weight(1f),
-                "Monthly fee total"
-            )
+            payments.filter { payment ->
+                runCatching {
+                    val paymentMonth = YearMonth.parse(payment.monthKey)
+                    if (yearlyCollection) {
+                        paymentMonth.year == collectionYear
+                    } else {
+                        paymentMonth == collectionPeriod
+                    }
+                }.getOrDefault(false)
+            }.sumOf { it.amount }
+        }
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onCollectionClick),
+            shape = RoundedCornerShape(18.dp),
+            color = Color(0xFFE5EFFD),
+            border = BorderStroke(1.dp, Color(0xFFD3E2FA))
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Total Collection",
+                        modifier = Modifier.weight(1f),
+                        color = Color(0xFF245BB5),
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Switch(
+                        checked = yearlyCollection,
+                        onCheckedChange = { yearlyCollection = it },
+                        modifier = Modifier
+                            .height(30.dp)
+                            .padding(horizontal = 2.dp),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFF245BB5),
+                            uncheckedThumbColor = Color(0xFF245BB5),
+                            checkedTrackColor = Color.White,
+                            uncheckedTrackColor = Color.White,
+                            checkedBorderColor = Color(0xFFD3E2FA),
+                            uncheckedBorderColor = Color(0xFFD3E2FA)
+                        )
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            rupees(displayedCollection),
+                            color = Color(0xFF173F7A),
+                            fontSize = 27.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            if (yearlyCollection) "Year $collectionYear"
+                            else collectionPeriod.format(
+                                java.time.format.DateTimeFormatter.ofPattern(
+                                    "MMMM yyyy", Locale.ENGLISH
+                                )
+                            ),
+                            color = Color(0xFF245BB5),
+                            fontSize = 13.sp
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = {
+                                if (yearlyCollection) collectionYear--
+                                else collectionPeriod = collectionPeriod.minusMonths(1)
+                            }
+                        ) {
+                            Text(
+                                text = "‹",
+                                color = Color(0xFF245BB5),
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Normal
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                if (yearlyCollection) collectionYear++
+                                else collectionPeriod = collectionPeriod.plusMonths(1)
+                            }
+                        ) {
+                            Text(
+                                text = "›",
+                                color = Color(0xFF245BB5),
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+            }
         }
 
     }
@@ -1687,22 +1882,7 @@ private fun StudentsScreen(
             }
         }
 
-        FloatingActionButton(
-            onClick = onAdd,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp)
-                .size(56.dp),
-            shape = RoundedCornerShape(16.dp),
-            containerColor = Green,
-            contentColor = Color.White
-        ) {
-            Icon(
-                Icons.Default.PersonAdd,
-                contentDescription = "Add student",
-                modifier = Modifier.size(28.dp)
-            )
-        }
+
     }
 }
 
@@ -2873,29 +3053,36 @@ private fun PaymentDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(13.dp)
             ) {
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = {
-                        amountText = it.filter(Char::isDigit)
-                        error = ""
-                    },
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Amount (₹)") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    OutlinedTextField(
+                        value = amountText,
+                        onValueChange = {
+                            amountText = it.filter(Char::isDigit)
+                            error = ""
+                        },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Amount (₹)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number
+                        )
                     )
-                )
 
-                if (student.feeType == "MONTHLY") {
+                    if (student.feeType == "MONTHLY") {
                     val selectedMonthLabel = runCatching {
                         YearMonth.parse(selectedMonthKey).format(
                             java.time.format.DateTimeFormatter.ofPattern("MMM yyyy", Locale.ENGLISH)
                         )
                     }.getOrDefault(selectedMonthKey)
 
-                    Box(Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier.weight(1f)
+                    ) {
                         OutlinedTextField(
                             value = selectedMonthLabel,
                             onValueChange = {},
@@ -2934,6 +3121,7 @@ private fun PaymentDialog(
                                     )
                                 }
                         }
+                    }
                     }
                 }
 
@@ -3078,6 +3266,7 @@ private fun ProfileScreen(
     onRestoreBackupClick: () -> Unit,
     onPrivacyPolicyClick: () -> Unit,
     onTermsClick: () -> Unit,
+    onUnlockPremiumClick: () -> Unit,
     onStudentDataChanged: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -3238,6 +3427,14 @@ private fun ProfileScreen(
 
 
 
+
+            ProfileSettingCard(
+                icon = Icons.Default.Settings,
+                title = "Unlock Premium",
+                subtitle = "Unlock more students and premium features",
+                status = "Explore",
+                onClick = onUnlockPremiumClick
+            )
 
             ProfileSettingCard(
                 icon = Icons.Default.Settings,
