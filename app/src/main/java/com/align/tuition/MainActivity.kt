@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -593,6 +594,7 @@ class MainActivity : ComponentActivity() {
                 // A successful background check must not change the visible screen.
             }
         )
+        driveCoordinator.setAutoSyncEnabled(true)
         lifetimePremiumBilling = LifetimePremiumBilling(
             context = applicationContext,
             onPremiumChanged = { enabled ->
@@ -638,6 +640,10 @@ class MainActivity : ComponentActivity() {
                         onRestoreBackupClick = { startDriveRestore() },
                         onStudentDataChanged = { driveCoordinator.requestAutoSync() },
                         isPremium = lifetimePremiumState.value,
+                        initialAutoSyncEnabled = driveCoordinator.isAutoSyncEnabled(),
+                        onAutoSyncEnabledChange = { enabled ->
+                            driveCoordinator.setAutoSyncEnabled(enabled)
+                        },
                         onPurchasePremiumClick = {
                             lifetimePremiumBilling?.launchPurchase(this)
                                 ?: android.widget.Toast.makeText(
@@ -798,8 +804,12 @@ private fun TuitionApp(
     onStudentDataChanged: () -> Unit,
     isPremium: Boolean,
     onPurchasePremiumClick: () -> Unit
+,
+    initialAutoSyncEnabled: Boolean,
+    onAutoSyncEnabledChange: (Boolean) -> Unit
 ) {
     val context = LocalContext.current
+    var autoSyncEnabled by remember { mutableStateOf(initialAutoSyncEnabled) }
     SideEffect {
         appCurrencyCode = selectedTuitionCurrency(context).code
     }
@@ -1047,6 +1057,14 @@ BackHandler(
                             onCollect = { student ->
                                 selectedStudent = student
                                 studentToCollect = student
+                            }
+                        ,
+                            isPremium = isPremium,
+                            onUnlockPremiumClick = { showPremiumDialog = true },
+                            isAutoSyncEnabled = autoSyncEnabled,
+                            onAutoSyncEnabledChange = { enabled ->
+                                autoSyncEnabled = enabled
+                                onAutoSyncEnabledChange(enabled)
                             }
                         )
                     }
@@ -1540,6 +1558,14 @@ private fun CollectionScreen(
     var selectedYear by remember { mutableStateOf(today.year) }
     var monthPickerOpen by remember { mutableStateOf(false) }
     var yearPickerOpen by remember { mutableStateOf(false) }
+    var monthPickerYear by remember {
+        mutableIntStateOf(runCatching {
+            java.time.YearMonth.parse(monthKey).year
+        }.getOrDefault(today.year))
+    }
+    var yearPickerStart by remember {
+        mutableIntStateOf((today.year / 10) * 10)
+    }
 
     val selectedMonth = remember(selectedMonthKey) {
         runCatching { java.time.YearMonth.parse(selectedMonthKey) }
@@ -1574,6 +1600,210 @@ private fun CollectionScreen(
     }
 
     val total = selectedPayments.sumOf { it.amount }
+
+    if (monthPickerOpen && selectedFilter == "This Month") {
+        val monthNamesForPicker = java.time.Month.values().map {
+            it.getDisplayName(
+                java.time.format.TextStyle.SHORT,
+                java.util.Locale.ENGLISH
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { monthPickerOpen = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color(0xFFF7FAF8),
+            title = {
+                Text(
+                    "Select Month",
+                    color = Color(0xFF123D2F),
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                if (monthPickerYear > 1900) monthPickerYear--
+                            }
+                        ) { Text("‹", fontSize = 30.sp, color = Green) }
+
+                        Text(
+                            monthPickerYear.toString(),
+                            fontSize = 21.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF123D2F)
+                        )
+
+                        TextButton(
+                            onClick = {
+                                if (monthPickerYear < 2100) monthPickerYear++
+                            }
+                        ) { Text("›", fontSize = 30.sp, color = Green) }
+                    }
+
+                    monthNamesForPicker.chunked(3).forEachIndexed { rowIndex, rowMonths ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowMonths.forEachIndexed { columnIndex, name ->
+                                val month = java.time.YearMonth.of(
+                                    monthPickerYear,
+                                    rowIndex * 3 + columnIndex + 1
+                                )
+                                val isSelected = month == selectedMonth
+
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            selectedMonthKey = month.toString()
+                                            monthPickerOpen = false
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) Color(0xFFDCEFE3) else Color.White,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Green else Color(0xFFD9E5DE)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 14.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            name,
+                                            color = if (isSelected) Color(0xFF123D2F) else Ink,
+                                            fontWeight = if (isSelected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Medium
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { monthPickerOpen = false }) {
+                    Text("Cancel", color = Green)
+                }
+            }
+        )
+    }
+
+    if (yearPickerOpen && selectedFilter == "This Year") {
+        val yearOptions = (yearPickerStart..(yearPickerStart + 11)).toList()
+
+        AlertDialog(
+            onDismissRequest = { yearPickerOpen = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color(0xFFF7FAF8),
+            title = {
+                Text(
+                    "Select Year",
+                    color = Color(0xFF123D2F),
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                if (yearPickerStart > 1900) yearPickerStart -= 12
+                            }
+                        ) { Text("‹", fontSize = 30.sp, color = Green) }
+
+                        Text(
+                            "$yearPickerStart–${yearPickerStart + 11}",
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF123D2F)
+                        )
+
+                        TextButton(
+                            onClick = {
+                                if (yearPickerStart < 2090) yearPickerStart += 12
+                            }
+                        ) { Text("›", fontSize = 30.sp, color = Green) }
+                    }
+
+                    yearOptions.chunked(3).forEach { rowYears ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowYears.forEach { year ->
+                                val isSelected = selectedYear == year
+
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            selectedYear = year
+                                            yearPickerOpen = false
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) Color(0xFFDCEFE3) else Color.White,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Green else Color(0xFFD9E5DE)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 13.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            year.toString(),
+                                            color = if (isSelected) Color(0xFF123D2F) else Ink,
+                                            fontWeight = if (isSelected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Medium
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { yearPickerOpen = false }) {
+                    Text("Cancel", color = Green)
+                }
+            }
+        )
+    }
+
     Column(modifier.fillMaxSize().background(Page)) {
         Row(
             modifier = Modifier
@@ -1613,9 +1843,11 @@ private fun CollectionScreen(
                                 if (filter == "This Month") {
                                     monthPickerOpen = !monthPickerOpen
                                     yearPickerOpen = false
+                                    monthPickerYear = selectedMonth.year
                                 } else if (filter == "This Year") {
                                     yearPickerOpen = !yearPickerOpen
                                     monthPickerOpen = false
+                                    yearPickerStart = (selectedYear / 10) * 10
                                 }
                             } else {
                                 selectedFilter = filter
@@ -1644,80 +1876,9 @@ private fun CollectionScreen(
                         )
                     }
 
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = filter == "This Month" && monthPickerOpen,
-                        onDismissRequest = { monthPickerOpen = false },
-                        modifier = Modifier
-                            .background(Color.White)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .heightIn(max = 320.dp)
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            TextButton(onClick = {
-                                selectedMonthKey = selectedMonth.minusYears(1).toString()
-                            }) { Text("‹") }
-                            Text(
-                                selectedMonth.year.toString(),
-                                fontWeight = FontWeight.Bold
-                            )
-                            TextButton(onClick = {
-                                selectedMonthKey = selectedMonth.plusYears(1).toString()
-                            }) { Text("›") }
-                        }
-                        monthNames.forEachIndexed { index, name ->
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        name,
-                                        fontWeight = if (selectedMonth.monthValue == index + 1)
-                                            FontWeight.Bold else FontWeight.Normal
-                                    )
-                                },
-                                onClick = {
-                                    selectedMonthKey = selectedMonth
-                                        .withMonth(index + 1).toString()
-                                    monthPickerOpen = false
-                                }
-                            )
-                        }
-                        }
-                    }
 
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = filter == "This Year" && yearPickerOpen,
-                        onDismissRequest = { yearPickerOpen = false },
-                        modifier = Modifier
-                            .background(Color.White)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .heightIn(max = 320.dp)
-                                .verticalScroll(rememberScrollState())
-                        ) {
-                        years.forEach { year ->
-                            androidx.compose.material3.DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        year.toString(),
-                                        fontWeight = if (selectedYear == year)
-                                            FontWeight.Bold else FontWeight.Normal
-                                    )
-                                },
-                                onClick = {
-                                    selectedYear = year
-                                    yearPickerOpen = false
-                                }
-                            )
-                        }
-                        }
-                    }
+
+
                 }
             }
         }
@@ -1877,9 +2038,16 @@ private fun StudentsScreen(
     onAdd: () -> Unit,
     onEdit: (StudentEntity) -> Unit,
     onStudentClick: (StudentEntity) -> Unit,
-    onCollect: (StudentEntity) -> Unit
+    onCollect: (StudentEntity) -> Unit,
+    isPremium: Boolean,
+    onUnlockPremiumClick: () -> Unit,
+    isAutoSyncEnabled: Boolean,
+    onAutoSyncEnabledChange: (Boolean) -> Unit
 ) {
     var search by remember { mutableStateOf("") }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showAutoSyncDialog by remember { mutableStateOf(false) }
+    var autoSyncDialogWillTurnOff by remember { mutableStateOf(true) }
     val filtered = students.filter { student ->
         (!pendingOnly || (pendingByStudent[student.id] ?: 0L) > 0L) &&
             (
@@ -1898,19 +2066,100 @@ private fun StudentsScreen(
                     .padding(start = 16.dp, end = 16.dp, top = 44.dp, bottom = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.White, RoundedCornerShape(16.dp)),
-                    singleLine = true,
-                    placeholder = { Text("Search name, phone or class") },
-                    leadingIcon = {
-                        Icon(Icons.Default.Search, contentDescription = null)
-                    },
-                    shape = RoundedCornerShape(16.dp)
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = search,
+                        onValueChange = { search = it },
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(Color.White, RoundedCornerShape(16.dp)),
+                        singleLine = true,
+                        placeholder = { Text("Search name, phone or class") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Search, contentDescription = null)
+                        },
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    Box {
+                        IconButton(
+                            onClick = {
+                                if (isPremium) menuExpanded = true
+                                else onUnlockPremiumClick()
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Premium options",
+                                tint = Color.White
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                            modifier = Modifier.background(Color.White)
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (isAutoSyncEnabled) "Auto Sync Off" else "Auto Sync On")
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    autoSyncDialogWillTurnOff = isAutoSyncEnabled
+                                    showAutoSyncDialog = true
+                                }
+                            )
+                        }
+                    }
+                }
+
+                if (showAutoSyncDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showAutoSyncDialog = false },
+                        containerColor = Color.White,
+                        tonalElevation = 0.dp,
+                        title = {
+                            Text(
+                                if (autoSyncDialogWillTurnOff) "Auto Sync Off" else "Auto Sync On",
+                                color = Color(0xFF123D2F),
+                                fontSize = 21.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        text = {
+                            Text(
+                                if (autoSyncDialogWillTurnOff) {
+                                    "Temporarily turn off Auto Sync if you want to add, edit and delete many transactions without syncing again and again."
+                                } else {
+                                    "Turn Auto Sync back on to resume automatic Google Drive syncing when your data changes."
+                                },
+                                color = Color(0xFF52635A),
+                                fontSize = 14.sp,
+                                lineHeight = 21.sp
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    val enabled = !autoSyncDialogWillTurnOff
+                                    onAutoSyncEnabledChange(enabled)
+                                    showAutoSyncDialog = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Green)
+                            ) {
+                                Text(if (autoSyncDialogWillTurnOff) "Turn Off" else "Turn On")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showAutoSyncDialog = false }) {
+                                Text("Cancel", color = Green)
+                            }
+                        }
+                    )
+                }
             }
 
             Column(
@@ -2355,9 +2604,233 @@ var showDeleteConfirmation by remember(student.id) { mutableStateOf(false) }
         mutableStateOf(LocalDate.now().year.toString())
     }
     var monthMenuExpanded by remember { mutableStateOf(false) }
+    var monthPickerYear by remember {
+        mutableIntStateOf(YearMonth.now().year)
+    }
     var yearMenuExpanded by remember { mutableStateOf(false) }
+    var yearPickerStart by remember {
+        mutableIntStateOf((LocalDate.now().year / 10) * 10)
+    }
     var error by remember { mutableStateOf("") }
     val keyboardController = LocalSoftwareKeyboardController.current
+
+    if (monthMenuExpanded) {
+        val selectedMonth = runCatching {
+            YearMonth.parse(selectedMonthKey)
+        }.getOrDefault(YearMonth.now())
+
+        val monthNames = java.time.Month.values().map {
+            it.getDisplayName(
+                java.time.format.TextStyle.SHORT,
+                Locale.ENGLISH
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { monthMenuExpanded = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color(0xFFF7FAF8),
+            title = {
+                Text(
+                    "Select Month",
+                    color = Color(0xFF123D2F),
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                if (monthPickerYear > 1900) monthPickerYear--
+                            }
+                        ) {
+                            Text("‹", fontSize = 30.sp, color = Green)
+                        }
+
+                        Text(
+                            monthPickerYear.toString(),
+                            fontSize = 21.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF123D2F)
+                        )
+
+                        TextButton(
+                            onClick = {
+                                if (monthPickerYear < 2100) monthPickerYear++
+                            }
+                        ) {
+                            Text("›", fontSize = 30.sp, color = Green)
+                        }
+                    }
+
+                    monthNames.chunked(3).forEachIndexed { rowIndex, rowMonths ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowMonths.forEachIndexed { columnIndex, monthName ->
+                                val monthNumber = rowIndex * 3 + columnIndex + 1
+                                val month = YearMonth.of(monthPickerYear, monthNumber)
+                                val isSelected = month == selectedMonth
+
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            selectedMonthKey = month.toString()
+                                            monthMenuExpanded = false
+                                            error = ""
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) {
+                                        Color(0xFFDCEFE3)
+                                    } else {
+                                        Color.White
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Green else Color(0xFFD9E5DE)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 14.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            monthName,
+                                            color = if (isSelected) {
+                                                Color(0xFF123D2F)
+                                            } else {
+                                                Ink
+                                            },
+                                            fontWeight = if (isSelected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Medium
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { monthMenuExpanded = false }) {
+                    Text("Cancel", color = Green)
+                }
+            }
+        )
+    }
+
+    if (yearMenuExpanded) {
+        val yearOptions = (yearPickerStart..(yearPickerStart + 11)).toList()
+
+        AlertDialog(
+            onDismissRequest = { yearMenuExpanded = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color(0xFFF7FAF8),
+            title = {
+                Text(
+                    "Select Year",
+                    color = Color(0xFF123D2F),
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                if (yearPickerStart > 1900) yearPickerStart -= 12
+                            }
+                        ) { Text("‹", fontSize = 30.sp, color = Green) }
+
+                        Text(
+                            "$yearPickerStart–${yearPickerStart + 11}",
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF123D2F)
+                        )
+
+                        TextButton(
+                            onClick = {
+                                if (yearPickerStart < 2090) yearPickerStart += 12
+                            }
+                        ) { Text("›", fontSize = 30.sp, color = Green) }
+                    }
+
+                    yearOptions.chunked(3).forEach { rowYears ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowYears.forEach { year ->
+                                val isSelected = selectedYear.toIntOrNull() == year
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            selectedYear = year.toString()
+                                            yearMenuExpanded = false
+                                            error = ""
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) Color(0xFFDCEFE3) else Color.White,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Green else Color(0xFFD9E5DE)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 13.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            year.toString(),
+                                            color = if (isSelected) Color(0xFF123D2F) else Ink,
+                                            fontWeight = if (isSelected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Medium
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { yearMenuExpanded = false }) {
+                    Text("Cancel", color = Green)
+                }
+            }
+        )
+    }
 
     Column(Modifier.fillMaxSize().background(Page)) {
         Row(
@@ -2503,34 +2976,11 @@ var showDeleteConfirmation by remember(student.id) { mutableStateOf(false) }
                                 }
                             )
                             Box(Modifier.matchParentSize().clickable {
+                                monthPickerYear = runCatching {
+                                    YearMonth.parse(selectedMonthKey).year
+                                }.getOrDefault(YearMonth.now().year)
                                 monthMenuExpanded = true
                             })
-                            DropdownMenu(
-                                expanded = monthMenuExpanded,
-                                onDismissRequest = { monthMenuExpanded = false },
-                                modifier = Modifier.heightIn(max = 280.dp).background(Color.White)
-                            ) {
-                                (-12L..12L).map { YearMonth.now().plusMonths(it) }
-                                    .forEach { month ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Text(
-                                                    month.format(
-                                                        DateTimeFormatter.ofPattern(
-                                                            "MMMM yyyy",
-                                                            Locale.getDefault()
-                                                        )
-                                                    )
-                                                )
-                                            },
-                                            onClick = {
-                                                selectedMonthKey = month.toString()
-                                                monthMenuExpanded = false
-                                                error = ""
-                                            }
-                                        )
-                                    }
-                            }
                         }
                     }
 
@@ -2556,25 +3006,11 @@ var showDeleteConfirmation by remember(student.id) { mutableStateOf(false) }
                                 }
                             )
                             Box(Modifier.matchParentSize().clickable {
+                                val currentSelectedYear =
+                                    selectedYear.toIntOrNull() ?: LocalDate.now().year
+                                yearPickerStart = (currentSelectedYear / 10) * 10
                                 yearMenuExpanded = true
                             })
-                            DropdownMenu(
-                                expanded = yearMenuExpanded,
-                                onDismissRequest = { yearMenuExpanded = false },
-                                modifier = Modifier.heightIn(max = 280.dp).background(Color.White)
-                            ) {
-                                ((LocalDate.now().year - 10)..(LocalDate.now().year + 10))
-                                    .forEach { year ->
-                                        DropdownMenuItem(
-                                            text = { Text(year.toString()) },
-                                            onClick = {
-                                                selectedYear = year.toString()
-                                                yearMenuExpanded = false
-                                                error = ""
-                                            }
-                                        )
-                                    }
-                            }
                         }
                     }
 
@@ -3079,6 +3515,12 @@ private fun PaymentDialog(
     var monthMenuExpanded by remember(student.id, existingPayment?.id) {
         mutableStateOf(false)
     }
+    var monthPickerYear by remember(student.id, existingPayment?.id) {
+        mutableStateOf(
+            runCatching { YearMonth.parse(existingPayment?.monthKey.orEmpty()).year }
+                .getOrDefault(YearMonth.now().year)
+        )
+    }
     var method by remember(student.id, existingPayment?.id) {
         mutableStateOf(
             if (existingPayment?.method == "Cash") "Cash"
@@ -3152,33 +3594,11 @@ private fun PaymentDialog(
                             shape = RoundedCornerShape(14.dp)
                         )
                         Box(Modifier.matchParentSize().clickable {
+                            monthPickerYear = runCatching {
+                                YearMonth.parse(selectedMonthKey).year
+                            }.getOrDefault(YearMonth.now().year)
                             monthMenuExpanded = true
                         })
-                        DropdownMenu(
-                            expanded = monthMenuExpanded,
-                            onDismissRequest = { monthMenuExpanded = false },
-                            modifier = Modifier.heightIn(max = 280.dp).background(Color.White)
-                        ) {
-                            (-24L..12L).map { YearMonth.now().plusMonths(it) }
-                                .forEach { month ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                month.format(
-                                                    java.time.format.DateTimeFormatter.ofPattern(
-                                                        "MMM yyyy", Locale.ENGLISH
-                                                    )
-                                                )
-                                            )
-                                        },
-                                        onClick = {
-                                            selectedMonthKey = month.toString()
-                                            monthMenuExpanded = false
-                                            error = ""
-                                        }
-                                    )
-                                }
-                        }
                     }
                     }
                 }
@@ -3292,6 +3712,123 @@ private fun PaymentDialog(
         },
         dismissButton = {}
     )
+
+    if (monthMenuExpanded && student.feeType == "MONTHLY") {
+        val selectedMonth = runCatching {
+            YearMonth.parse(selectedMonthKey)
+        }.getOrDefault(YearMonth.now())
+
+        val monthNames = java.time.Month.values().map {
+            it.getDisplayName(
+                java.time.format.TextStyle.SHORT,
+                Locale.ENGLISH
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { monthMenuExpanded = false },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color(0xFFF7FAF8),
+            title = {
+                Text(
+                    "Select Month",
+                    color = Color(0xFF123D2F),
+                    fontSize = 21.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = { if (monthPickerYear > 1900) monthPickerYear-- }
+                        ) {
+                            Text("‹", fontSize = 30.sp, color = Green)
+                        }
+
+                        Text(
+                            monthPickerYear.toString(),
+                            fontSize = 21.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF123D2F)
+                        )
+
+                        TextButton(
+                            onClick = { if (monthPickerYear < 2100) monthPickerYear++ }
+                        ) {
+                            Text("›", fontSize = 30.sp, color = Green)
+                        }
+                    }
+
+                    monthNames.chunked(3).forEachIndexed { rowIndex, rowMonths ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowMonths.forEachIndexed { columnIndex, monthName ->
+                                val monthNumber = rowIndex * 3 + columnIndex + 1
+                                val month = YearMonth.of(monthPickerYear, monthNumber)
+                                val isSelected = month == selectedMonth
+
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            selectedMonthKey = month.toString()
+                                            monthMenuExpanded = false
+                                            error = ""
+                                        },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isSelected) {
+                                        Color(0xFFDCEFE3)
+                                    } else {
+                                        Color.White
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) Green else Color(0xFFD9E5DE)
+                                    )
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 14.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            monthName,
+                                            color = if (isSelected) {
+                                                Color(0xFF123D2F)
+                                            } else {
+                                                Ink
+                                            },
+                                            fontWeight = if (isSelected) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Medium
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { monthMenuExpanded = false }) {
+                    Text("Cancel", color = Green)
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -3594,19 +4131,21 @@ private fun ProfileScreen(
                 }
             }
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                color = Color.White,
-                border = BorderStroke(1.dp, Color(0xFFD9E5DE))
-            ) {
-                ProfileSettingCard(
-                    icon = Icons.Default.Settings,
-                    title = "Unlock Premium",
-                    subtitle = "Add unlimited students.",
-                    status = "Explore",
-                    onClick = onUnlockPremiumClick
-                )
+            if (!isPremium) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color.White,
+                    border = BorderStroke(1.dp, Color(0xFFD9E5DE))
+                ) {
+                    ProfileSettingCard(
+                        icon = Icons.Default.Settings,
+                        title = "Unlock Premium",
+                        subtitle = "Add unlimited students.",
+                        status = "Explore",
+                        onClick = onUnlockPremiumClick
+                    )
+                }
             }
 
             ProfileSettingCard(

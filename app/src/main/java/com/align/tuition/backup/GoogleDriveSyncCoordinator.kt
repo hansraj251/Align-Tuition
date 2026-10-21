@@ -22,6 +22,7 @@ class GoogleDriveSyncCoordinator(
     companion object {
         private const val AUTO_SYNC_DEBOUNCE_MS = 2500L
         private const val PREFS_NAME = "tuition_google_drive_sync"
+        private const val AUTO_SYNC_ENABLED = "auto_sync_enabled"
         private const val PENDING_GENERATION = "pending_generation"
         private const val COMPLETED_GENERATION = "completed_generation"
         private const val LAST_SYNCED_DRIVE_MODIFIED_TIME =
@@ -63,7 +64,29 @@ class GoogleDriveSyncCoordinator(
         requestSync(manual = false)
     }
 
+    fun isAutoSyncEnabled(): Boolean =
+        prefs.getBoolean(AUTO_SYNC_ENABLED, true)
+
+    fun setAutoSyncEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(AUTO_SYNC_ENABLED, enabled).apply()
+        if (!enabled) {
+            autoSyncHandler.removeCallbacks(autoSyncRunnable)
+        }
+    }
+
     fun requestAutoSync() {
+        // Always persist local data changes, even while Auto Sync is OFF.
+        // This lets startup resume upload changes made during the OFF session.
+        synchronized(lock) {
+            generation.incrementAndGet()
+            persistPendingGeneration()
+        }
+
+        if (!isAutoSyncEnabled()) {
+            autoSyncHandler.removeCallbacks(autoSyncRunnable)
+            return
+        }
+
         autoSyncHandler.removeCallbacks(autoSyncRunnable)
         autoSyncHandler.postDelayed(autoSyncRunnable, AUTO_SYNC_DEBOUNCE_MS)
     }
@@ -184,7 +207,8 @@ class GoogleDriveSyncCoordinator(
             paused = false
             running = false
 
-            startPendingSync &&
+            isAutoSyncEnabled() &&
+                startPendingSync &&
                 generation.get() > completedGeneration
         }
 
@@ -223,6 +247,7 @@ class GoogleDriveSyncCoordinator(
     }
 
     private fun requestSync(manual: Boolean) {
+        if (!manual && !isAutoSyncEnabled()) return
         val shouldStart = synchronized(lock) {
             generation.incrementAndGet()
             persistPendingGeneration()
