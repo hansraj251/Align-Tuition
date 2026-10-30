@@ -14,7 +14,6 @@ import com.android.billingclient.api.Purchase
 import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
-import com.align.tuition.backup.DriveAccountBinding
 
 /**
  * Google Play Billing manager for the lifetime, non-consumable Premium product.
@@ -148,13 +147,7 @@ class LifetimePremiumBilling(
     }
 
     fun launchPurchase(activity: Activity) {
-        val driveAccountId = DriveAccountBinding.currentAccountId(appContext)
-        if (driveAccountId.isNullOrBlank()) {
-            setPremium(false)
-            onMessage("Connect and verify Google Drive before purchasing Premium.")
-            return
-        }
-        if (!billingClient.isReady) {
+if (!billingClient.isReady) {
             onMessage("Connecting to Google Play. Please try again.")
             connect()
             return
@@ -173,7 +166,6 @@ class LifetimePremiumBilling(
 
         val flowParams = BillingFlowParams.newBuilder()
             .setProductDetailsParamsList(listOf(productParams))
-            .setObfuscatedAccountId(driveAccountId)
             .build()
 
         val result = billingClient.launchBillingFlow(activity, flowParams)
@@ -205,33 +197,13 @@ class LifetimePremiumBilling(
     }
 
     private fun processPurchases(purchases: List<Purchase>) {
-        val currentAccountId = DriveAccountBinding.currentAccountId(appContext)
-
         val lifetimePurchases = purchases.filter {
             PRODUCT_ID in it.products &&
                 it.purchaseState == Purchase.PurchaseState.PURCHASED
         }
 
-        val matchingPurchases = lifetimePurchases.filter { purchase ->
-            !currentAccountId.isNullOrBlank() &&
-                purchase.accountIdentifiers?.obfuscatedAccountId == currentAccountId
-        }
+        setPremium(lifetimePurchases.any { it.isAcknowledged })
 
-        // Acknowledged purchases only grant Premium when their account ID matches.
-        setPremium(matchingPurchases.any { it.isAcknowledged })
-
-        if (lifetimePurchases.isNotEmpty() && matchingPurchases.isEmpty()) {
-            onMessage(
-                if (currentAccountId.isNullOrBlank()) {
-                    "Connect and verify Google Drive to check Premium ownership."
-                } else {
-                    "This Premium purchase is not linked to the current Google Drive account."
-                }
-            )
-        }
-
-        // Acknowledge completed purchases even when they do not match this account.
-        // Acknowledgement does not grant Premium by itself.
         lifetimePurchases.filter { !it.isAcknowledged }.forEach { purchase ->
             val params = AcknowledgePurchaseParams.newBuilder()
                 .setPurchaseToken(purchase.purchaseToken)
@@ -239,17 +211,7 @@ class LifetimePremiumBilling(
 
             billingClient.acknowledgePurchase(params) { result ->
                 if (result.responseCode == BillingClient.BillingResponseCode.OK) {
-                    val activeAccountId =
-                        DriveAccountBinding.currentAccountId(appContext)
-
-                    if (
-                        !activeAccountId.isNullOrBlank() &&
-                        purchase.accountIdentifiers?.obfuscatedAccountId == activeAccountId
-                    ) {
-                        setPremium(true)
-                    } else {
-                        setPremium(false)
-                    }
+                    setPremium(true)
                 } else {
                     onMessage(
                         "Purchase acknowledgement failed: ${result.debugMessage}"

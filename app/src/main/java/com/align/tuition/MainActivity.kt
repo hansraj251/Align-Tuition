@@ -131,6 +131,7 @@ class MainActivity : ComponentActivity() {
     private val DRIVE_AUTH_REQUEST = 7812
     private var pendingDriveAction = "backup"
     private val lifetimePremiumState = androidx.compose.runtime.mutableStateOf(false)
+    private val connectedDriveEmailState = mutableStateOf<String?>(null)
     private var lifetimePremiumBilling: LifetimePremiumBilling? = null
 
     private val initialDriveSetupState =
@@ -217,10 +218,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun captureDriveAccountIdentity(accessToken: String) {
-        lifetimePremiumBilling?.invalidatePremium()
         DriveAccountBinding.capture(applicationContext, accessToken) {
             runOnUiThread {
-                lifetimePremiumBilling?.restorePurchases()
+                connectedDriveEmailState.value =
+                    DriveAccountBinding.currentEmail(applicationContext)
             }
         }
     }
@@ -290,6 +291,60 @@ class MainActivity : ComponentActivity() {
         data: android.content.Intent?
     ) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 4721) {
+            if (resultCode != android.app.Activity.RESULT_OK) return
+
+            val selectedUri = data?.data
+            if (selectedUri == null) {
+                showDriveMessage("No backup file was selected.")
+                return
+            }
+
+            val restore = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+            showDriveMessage("Checking selected backup...")
+
+            restore.validateLocalBackup(selectedUri) { result ->
+                result.onFailure { error ->
+                    showDriveMessage(
+                        "Backup rejected: ${error.message ?: error.javaClass.simpleName}"
+                    )
+                    Log.e("TuitionLocalRestore", "Selected backup validation failed", error)
+                }.onSuccess {
+                    android.app.AlertDialog.Builder(this)
+                        .setTitle("Confirm Restore")
+                        .setMessage(
+                            "The selected backup is valid. Restoring it will replace " +
+                            "the data currently on this device. A local safety copy " +
+                            "will be kept first. Continue?"
+                        )
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Restore") { _, _ ->
+                            try {
+                                showDriveMessage("Restoring selected backup...")
+                                TuitionDatabase.closeInstance()
+                                val safetyCopy = restore.replaceValidatedDatabase()
+                                showDriveMessage(
+                                    "Restore completed. Safety copy: ${safetyCopy.name}"
+                                )
+                                window.decorView.postDelayed({ recreate() }, 900)
+                            } catch (error: Exception) {
+                                Log.e(
+                                    "TuitionLocalRestore",
+                                    "Local database restore failed",
+                                    error
+                                )
+                                showDriveMessage(
+                                    "Restore failed: ${error.message ?: error.javaClass.simpleName}. " +
+                                    "Check the local safety backup before retrying."
+                                )
+                            }
+                        }
+                        .show()
+                }
+            }
+            return
+        }
+
         if (requestCode != DRIVE_AUTH_REQUEST) return
 
         if (resultCode != android.app.Activity.RESULT_OK || data == null) {
@@ -330,6 +385,10 @@ class MainActivity : ComponentActivity() {
                     pendingDriveAction = "backup"
                     findAndConfirmRestore(token)
                 }
+                "download" -> {
+                    pendingDriveAction = "backup"
+                    downloadDriveBackup(token)
+                }
                 else -> {
                     captureDriveAccountIdentity(token)
                     driveCoordinator.continueManualSyncWithAccessToken(token)
@@ -358,7 +417,7 @@ class MainActivity : ComponentActivity() {
         pendingDriveAction = "verify"
         try {
             com.align.tuition.backup.GoogleDriveAuthorization(this)
-                .authorize()
+                .authorize(forceAccountSelection = true)
                 .addOnSuccessListener { result ->
                     if (result.hasResolution()) {
                         val sender = result.pendingIntent?.intentSender
@@ -395,6 +454,99 @@ class MainActivity : ComponentActivity() {
         } catch (error: Exception) {
             pendingDriveAction = "backup"
             showDriveMessage("Could not start verification: ${error.message}")
+        }
+    }
+
+    private fun startDriveDownloadBackup() {
+        pendingDriveAction = "download"
+        showDriveMessage("Connecting to Google Drive...")
+
+        try {
+            com.align.tuition.backup.GoogleDriveAuthorization(this)
+                .authorize()
+                .addOnSuccessListener { result ->
+                    if (result.hasResolution()) {
+                        val sender = result.pendingIntent?.intentSender
+                        if (sender == null) {
+                            pendingDriveAction = "backup"
+                            showDriveMessage("Google authorization needs to be retried.")
+                        } else {
+                            try {
+                                startIntentSenderForResult(
+                                    sender, DRIVE_AUTH_REQUEST, null, 0, 0, 0
+                                )
+                            } catch (error: Exception) {
+                                pendingDriveAction = "backup"
+                                showDriveMessage(
+                                    "Could not open Google authorization: ${error.message}"
+                                )
+                            }
+                        }
+                    } else {
+                        val token = result.accessToken
+                        pendingDriveAction = "backup"
+                        if (token.isNullOrBlank()) {
+                            showDriveMessage("Google returned no access token.")
+                        } else {
+                            downloadDriveBackup(token)
+                        }
+                    }
+                }
+                .addOnFailureListener { error ->
+                    pendingDriveAction = "backup"
+                    showDriveMessage(
+                        "Google Drive authorization failed: ${error.message ?: "Unknown error"}"
+                    )
+                    Log.e("TuitionDriveDownload", "Authorization failed", error)
+                }
+        } catch (error: Exception) {
+            pendingDriveAction = "backup"
+            showDriveMessage("Could not start download: ${error.message ?: "Unknown error"}")
+        }
+    }
+
+    private fun downloadDriveBackup(accessToken: String) {
+        captureDriveAccountIdentity(accessToken)
+        showDriveMessage("Downloading backup to your Downloads folder...")
+
+        val exporter = com.align.tuition.backup.GoogleDriveRestore(applicationContext)
+        exporter.downloadBackupToDownloads(accessToken) { result ->
+            result.onSuccess { message ->
+                showDriveMessage(message)
+            }.onFailure { error ->
+                val message = if (
+                    error is com.align.tuition.backup.GoogleDriveRestore.NoBackupFoundException
+                ) {
+                    "No Align-Tuition backup found in Google Drive."
+                } else {
+                    "Backup download failed: ${error.message ?: "Unknown error"}"
+                }
+                showDriveMessage(message)
+                Log.e("TuitionDriveDownload", message, error)
+            }
+        }
+    }
+
+
+    private fun startLocalBackupRestore() {
+        try {
+            val intent = android.content.Intent(
+                android.content.Intent.ACTION_OPEN_DOCUMENT
+            ).apply {
+                addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(
+                    android.content.Intent.EXTRA_MIME_TYPES,
+                    arrayOf(
+                        "application/octet-stream",
+                        "application/x-sqlite3",
+                        "application/vnd.sqlite3"
+                    )
+                )
+            }
+            startActivityForResult(intent, 4721)
+        } catch (error: Exception) {
+            showDriveMessage("Could not open the phone's file picker: ${error.message}")
         }
     }
 
@@ -503,26 +655,29 @@ class MainActivity : ComponentActivity() {
 
     private fun verifyDriveBackup(accessToken: String) {
         captureDriveAccountIdentity(accessToken)
-        showDriveMessage("Checking Google Drive backup...")
-        com.align.tuition.backup.GoogleDriveRestore(applicationContext)
-            .findBackupMetadata(accessToken) { result ->
-                result
-                    .onSuccess { metadata ->
-                        if (metadata == null) {
-                            showDriveMessage("No Align Tuition backup found in Google Drive app data.")
-                        } else {
-                            showDriveMessage(
-                                "Backup found: Align Tuition Backup.db\nModified: ${metadata.modifiedTime}\nFile ID: ${metadata.fileId}"
-                            )
-                        }
-                    }
-                    .onFailure { error ->
-                        showDriveMessage(
-                            "Backup verification failed: ${error.message ?: error.javaClass.simpleName}"
-                        )
-                        android.util.Log.e("TuitionDriveAuth", "Drive backup verification failed", error)
-                    }
+        showDriveMessage(
+            "Syncing local tuition data to the connected Google Drive account..."
+        )
+
+        driveCoordinator.syncLocalDataToAccount(accessToken) { result ->
+            result.onSuccess {
+                showDriveMessage(
+                    "Local tuition data synced successfully. " +
+                        "The backup in this Google account was updated or created. " +
+                        "No remote backup was restored over local data."
+                )
+            }.onFailure { error ->
+                showDriveMessage(
+                    "Local data sync failed: " +
+                        (error.message ?: error.javaClass.simpleName)
+                )
+                android.util.Log.e(
+                    "TuitionDriveAuth",
+                    "Local-to-Drive account sync failed",
+                    error
+                )
             }
+        }
     }
 
     private fun showDriveMessage(message: String) {
@@ -538,7 +693,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Detect an existing local database before the coordinator can open/create it.
+
+        connectedDriveEmailState.value = DriveAccountBinding.currentEmail(applicationContext)
+// Detect an existing local database before the coordinator can open/create it.
         hadLocalDatabaseBeforeStartup =
             getDatabasePath("align_tuition.db").exists()
 
@@ -637,9 +794,11 @@ class MainActivity : ComponentActivity() {
                     TuitionApp(
                         onBackupClick = { driveCoordinator.requestManualSync() },
                         onVerifyBackupClick = { startDriveVerification() },
-                        onRestoreBackupClick = { startDriveRestore() },
+                        onDownloadBackupClick = { startDriveDownloadBackup() },
+                        onRestoreBackupClick = { startLocalBackupRestore() },
                         onStudentDataChanged = { driveCoordinator.requestAutoSync() },
                         isPremium = lifetimePremiumState.value,
+                        connectedDriveEmail = connectedDriveEmailState.value,
                         initialAutoSyncEnabled = driveCoordinator.isAutoSyncEnabled(),
                         onAutoSyncEnabledChange = { enabled ->
                             driveCoordinator.setAutoSyncEnabled(enabled)
@@ -800,9 +959,11 @@ private fun InitialDriveSetupScreen(
 private fun TuitionApp(
     onBackupClick: () -> Unit,
     onVerifyBackupClick: () -> Unit,
+    onDownloadBackupClick: () -> Unit,
     onRestoreBackupClick: () -> Unit,
     onStudentDataChanged: () -> Unit,
     isPremium: Boolean,
+    connectedDriveEmail: String?,
     onPurchasePremiumClick: () -> Unit
 ,
     initialAutoSyncEnabled: Boolean,
@@ -1022,11 +1183,13 @@ BackHandler(
                     "Profile" -> ProfileScreen(
                         onBackupClick = onBackupClick,
                         onVerifyBackupClick = onVerifyBackupClick,
+                        onDownloadBackupClick = onDownloadBackupClick,
                         onRestoreBackupClick = onRestoreBackupClick,
                         onPrivacyPolicyClick = { legalPage = "Privacy Policy" },
                         onTermsClick = { legalPage = "Terms & Conditions" },
                         onUnlockPremiumClick = { showPremiumDialog = true },
                         isPremium = isPremium,
+                        connectedDriveEmail = connectedDriveEmail,
                         onStudentDataChanged = onStudentDataChanged,
                         modifier = Modifier.weight(1f),
                         profile = profile,
@@ -3890,12 +4053,14 @@ private fun ProfileScreen(
     onSave: (String, String) -> Unit,
     onBackupClick: () -> Unit,
     onVerifyBackupClick: () -> Unit,
+    onDownloadBackupClick: () -> Unit,
     onRestoreBackupClick: () -> Unit,
     onPrivacyPolicyClick: () -> Unit,
     onTermsClick: () -> Unit,
     onUnlockPremiumClick: () -> Unit,
     onStudentDataChanged: () -> Unit,
-    isPremium: Boolean
+    isPremium: Boolean,
+    connectedDriveEmail: String?
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     SideEffect {
@@ -4147,6 +4312,29 @@ private fun ProfileScreen(
                     )
                 }
             }
+
+            ProfileSettingCard(
+                icon = Icons.Filled.Person,
+                title = "Change Google Drive Account",
+                subtitle = connectedDriveEmail?.let { "Connected: $it" } ?: "No Google Drive account connected",
+                status = "Change",
+                onClick = onVerifyBackupClick
+            )
+
+            ProfileSettingCard(
+                icon = Icons.Default.Settings,
+                title = "Download Backup",
+                subtitle = "Save a copy of your Google Drive backup to Downloads",
+                status = "Download",
+                onClick = onDownloadBackupClick
+            )
+            ProfileSettingCard(
+                icon = Icons.Default.Settings,
+                title = "Restore Backup",
+                subtitle = "Restore your data from Google Drive backup",
+                status = "Restore",
+                onClick = onRestoreBackupClick
+            )
 
             ProfileSettingCard(
                 icon = Icons.Default.Settings,

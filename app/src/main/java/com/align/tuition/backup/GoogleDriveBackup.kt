@@ -45,40 +45,19 @@ class GoogleDriveBackup(
             try {
                 snapshot = createDatabaseSnapshot(database)
 
-                val storedFileId =
-                    preferences.getString(
-                        FILE_ID_KEY,
-                        null
-                    )
+                val fileIdOnCurrentAccount =
+                    findExistingBackupFileId(accessToken)
 
                 val fileId =
-                    if (storedFileId.isNullOrBlank()) {
-                        uploadNewFile(
+                    if (fileIdOnCurrentAccount == null) {
+                        uploadNewFile(snapshot, accessToken)
+                    } else {
+                        updateExistingFile(
+                            fileIdOnCurrentAccount,
                             snapshot,
                             accessToken
                         )
-                    } else {
-                        try {
-                            updateExistingFile(
-                                storedFileId,
-                                snapshot,
-                                accessToken
-                            )
-                            storedFileId
-                        } catch (error: Exception) {
-                            if (error.message?.contains("HTTP 404") == true) {
-                                preferences.edit()
-                                    .remove(FILE_ID_KEY)
-                                    .apply()
-
-                                uploadNewFile(
-                                    snapshot,
-                                    accessToken
-                                )
-                            } else {
-                                throw error
-                            }
-                        }
+                        fileIdOnCurrentAccount
                     }
 
                 preferences.edit()
@@ -135,6 +114,62 @@ class GoogleDriveBackup(
         }
 
         return snapshot
+    }
+
+    /**
+     * Looks up the backup only inside the appDataFolder belonging to the
+     * account represented by this access token.
+     */
+    private fun findExistingBackupFileId(accessToken: String): String? {
+        val encodedQuery = URLEncoder.encode(
+            "name = '$BACKUP_FILE_NAME' and trashed = false",
+            "UTF-8"
+        )
+        val url = URL(
+            "$DRIVE_FILE_URL?q=$encodedQuery" +
+                "&spaces=appDataFolder" +
+                "&pageSize=10" +
+                "&fields=files(id,name,modifiedTime)"
+        )
+        val connection = url.openConnection() as HttpURLConnection
+
+        try {
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 60_000
+            connection.readTimeout = 60_000
+            connection.setRequestProperty(
+                "Authorization",
+                "Bearer $accessToken"
+            )
+
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                val errorBody = try {
+                    connection.errorStream
+                        ?.bufferedReader()
+                        ?.use { it.readText() }
+                        ?: "No error response."
+                } catch (_: Exception) {
+                    "Unable to read error response."
+                }
+                throw IllegalStateException(
+                    "Drive backup lookup failed: HTTP $responseCode: $errorBody"
+                )
+            }
+
+            val response = connection.inputStream
+                .bufferedReader()
+                .use { it.readText() }
+            val files = JSONObject(response).optJSONArray("files")
+                ?: return null
+
+            if (files.length() == 0) return null
+            return files.getJSONObject(0).optString("id").takeIf {
+                it.isNotBlank()
+            }
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun uploadNewFile(

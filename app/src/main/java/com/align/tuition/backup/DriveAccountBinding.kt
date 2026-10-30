@@ -18,6 +18,13 @@ object DriveAccountBinding {
     private const val KEY_EMAIL = "drive_account_email"
     private val executor = Executors.newSingleThreadExecutor()
 
+    fun currentEmail(context: Context): String? =
+        context.applicationContext
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_EMAIL, null)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
     fun currentAccountId(context: Context): String? {
         val email = context.applicationContext
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)

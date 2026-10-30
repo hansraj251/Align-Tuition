@@ -91,6 +91,26 @@ class GoogleDriveSyncCoordinator(
         autoSyncHandler.postDelayed(autoSyncRunnable, AUTO_SYNC_DEBOUNCE_MS)
     }
 
+    /**
+     * Uploads the current local database directly to the account represented
+     * by accessToken. This deliberately skips startup remote-backup checks
+     * and never restores remote data over the local database.
+     */
+    fun syncLocalDataToAccount(
+        accessToken: String,
+        callback: (Result<Unit>) -> Unit
+    ) {
+        onSyncStarted?.invoke()
+        backup.sync(database, accessToken) { result ->
+            result.onSuccess {
+                onSyncSuccess?.invoke()
+            }.onFailure { error ->
+                onSyncFailure?.invoke(error)
+            }
+            callback(result)
+        }
+    }
+
     fun requestManualSync() {
         requestSync(manual = true)
     }

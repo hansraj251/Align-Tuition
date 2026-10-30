@@ -252,6 +252,150 @@ class GoogleDriveRestore(
         }
     }
 
+    /**
+     * Downloads the Drive backup into the device Downloads folder.
+     * This method never restores or replaces the app database.
+     */
+    fun downloadBackupToDownloads(
+        accessToken: String,
+        callback: (Result<String>) -> Unit
+    ) {
+        Thread {
+            var tempFile: File? = null
+            var destinationUri: android.net.Uri? = null
+
+            try {
+                if (android.os.Build.VERSION.SDK_INT < 29) {
+                    throw IllegalStateException(
+                        "Saving directly to Downloads requires Android 10 or later."
+                    )
+                }
+
+                val metadata = findBackupMetadataBlocking(accessToken)
+                    ?: throw NoBackupFoundException()
+
+                tempFile = File(
+                    context.cacheDir,
+                    "tuition_export_${System.currentTimeMillis()}.tmp"
+                )
+
+                downloadBackup(metadata.fileId, accessToken, tempFile)
+
+                val values = android.content.ContentValues().apply {
+                    put(
+                        android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+                        "Align Tuition Backup.db"
+                    )
+                    put(
+                        android.provider.MediaStore.MediaColumns.MIME_TYPE,
+                        "application/octet-stream"
+                    )
+                    put(
+                        android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                        android.os.Environment.DIRECTORY_DOWNLOADS
+                    )
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+
+                destinationUri = context.contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: throw IllegalStateException(
+                    "Could not create the backup file in Downloads."
+                )
+
+                val output = context.contentResolver.openOutputStream(destinationUri!!)
+                    ?: throw IllegalStateException(
+                        "Could not open the Downloads file for writing."
+                    )
+
+                tempFile.inputStream().use { input ->
+                    output.use { stream -> input.copyTo(stream) }
+                }
+
+                val publishedValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                context.contentResolver.update(
+                    destinationUri!!,
+                    publishedValues,
+                    null,
+                    null
+                )
+
+                mainHandler.post {
+                    callback(
+                        Result.success(
+                            "Backup downloaded to Downloads/Align Tuition Backup.db"
+                        )
+                    )
+                }
+            } catch (error: Exception) {
+                destinationUri?.let { uri ->
+                    try {
+                        context.contentResolver.delete(uri, null, null)
+                    } catch (_: Exception) {
+                    }
+                }
+
+                mainHandler.post {
+                    callback(Result.failure(error))
+                }
+            } finally {
+                tempFile?.delete()
+            }
+        }.start()
+    }
+
+
+    /**
+     * Reads a user-selected local backup, validates it, and stages it for
+     * replaceValidatedDatabase(). It does not replace the live database.
+     */
+    fun validateLocalBackup(
+        uri: android.net.Uri,
+        callback: (Result<Unit>) -> Unit
+    ) {
+        Thread {
+            val incoming = File(
+                context.cacheDir,
+                "tuition_local_restore_${System.currentTimeMillis()}.db"
+            )
+            val validated = File(
+                context.cacheDir,
+                "tuition_restore_validated.db"
+            )
+
+            try {
+                val input = context.contentResolver.openInputStream(uri)
+                    ?: throw IllegalStateException("Could not open the selected backup file.")
+
+                input.use { source ->
+                    FileOutputStream(incoming).use { output ->
+                        source.copyTo(output)
+                    }
+                }
+
+                if (!incoming.exists() || incoming.length() == 0L) {
+                    throw IllegalStateException("The selected backup file is empty.")
+                }
+
+                // Validate before making this file eligible for restore.
+                validateDatabase(incoming)
+
+                incoming.copyTo(validated, overwrite = true)
+
+                mainHandler.post { callback(Result.success(Unit)) }
+            } catch (error: Exception) {
+                incoming.delete()
+                validated.delete()
+                mainHandler.post { callback(Result.failure(error)) }
+            } finally {
+                incoming.delete()
+            }
+        }.start()
+    }
+
     class NoBackupFoundException : Exception(
         "No Align-Tuition backup found on Google Drive."
     )

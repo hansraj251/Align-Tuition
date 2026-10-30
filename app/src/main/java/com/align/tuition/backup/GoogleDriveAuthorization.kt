@@ -22,8 +22,10 @@ class GoogleDriveAuthorization(
             context
         )
 
-    fun createAuthorizationRequest(): AuthorizationRequest {
-        return AuthorizationRequest
+    fun createAuthorizationRequest(
+        forceAccountSelection: Boolean = false
+    ): AuthorizationRequest {
+        val builder = AuthorizationRequest
             .builder()
             .setRequestedScopes(
                 listOf(
@@ -32,11 +34,16 @@ class GoogleDriveAuthorization(
                     Scope("https://www.googleapis.com/auth/userinfo.email")
                 )
             )
-            .build()
+
+        if (forceAccountSelection) {
+            builder.setPrompt(AuthorizationRequest.Prompt.SELECT_ACCOUNT)
+        }
+
+        return builder.build()
     }
 
-    fun authorize() =
+    fun authorize(forceAccountSelection: Boolean = false) =
         authorizationClient.authorize(
-            createAuthorizationRequest()
+            createAuthorizationRequest(forceAccountSelection)
         )
 }
